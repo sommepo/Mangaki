@@ -102,6 +102,7 @@ const BaseReaderPage = ({
     return (
         <SpinnerImage
             {...props}
+            imgClassName="manatan-reader-page"
             onLoad={handleLoad}
             onError={handleError}
             shouldLoad={shouldLoad}

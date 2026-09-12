@@ -9,9 +9,10 @@ import { getPopupTheme } from '@/features/ln/reader/utils/themes';
 
 const POPUP_GAP = 10;
 const POPUP_MIN_WIDTH_PX = 280;
-const POPUP_MAX_WIDTH_PX = 1920;
-const POPUP_MIN_HEIGHT_PX = 200;
+const POPUP_MAX_WIDTH_PX = 420;
+const POPUP_MIN_HEIGHT_PX = 120;
 const POPUP_MAX_HEIGHT_PX = 1080;
+const MOBILE_POPUP_MAX_HEIGHT_FRACTION = 0.36;
 
 
 interface LookupHistoryEntry {
@@ -24,8 +25,8 @@ interface LookupHistoryEntry {
 }
 
 const HighlightOverlay = () => {
-    const { dictPopup } = useOCR();
-    if (!dictPopup.visible || !dictPopup.highlight?.rects) return null;
+    const { dictPopup, settings } = useOCR();
+    if (!settings.ocrBoxlessMode || !dictPopup.visible || !dictPopup.highlight?.rects) return null;
 
     return (
         <div
@@ -49,9 +50,9 @@ const HighlightOverlay = () => {
                         top: rect.y,
                         width: rect.width,
                         height: rect.height,
-                        backgroundColor: 'rgba(120, 120, 120, 0.28)',
+                        backgroundColor: 'rgba(91, 143, 214, 0.42)',
                         borderRadius: '2px',
-                        borderBottom: '2px solid rgba(95, 95, 95, 0.85)',
+                        boxShadow: 'inset 0 -2px 0 rgba(69, 113, 177, 0.9)',
                     }}
                 />
             ))}
@@ -67,13 +68,17 @@ export const YomitanPopup = () => {
     const [history, setHistory] = useState<LookupHistoryEntry[]>([]);
     const [historyIndex, setHistoryIndex] = useState(-1);
 
+    const closePopup = useCallback(() => {
+        window.getSelection()?.removeAllRanges();
+        notifyPopupClosed();
+        setDictPopup(prev => ({ ...prev, visible: false }));
+    }, [notifyPopupClosed, setDictPopup]);
+
     // Handle native Android back button
     React.useEffect(() => {
         const handleNativeBack = () => {
             if (dictPopup.visible) {
-                window.getSelection()?.removeAllRanges();
-                notifyPopupClosed();
-                setDictPopup(prev => ({ ...prev, visible: false }));
+                closePopup();
                 return true;
             }
             return false;
@@ -86,7 +91,7 @@ export const YomitanPopup = () => {
             // @ts-ignore
             window.__handleNativeBack = undefined;
         };
-    }, [dictPopup.visible, setDictPopup, notifyPopupClosed]);
+    }, [closePopup, dictPopup.visible]);
 
     const maxHistory = settings.yomitanLookupMaxHistory || 10;
     const navMode = settings.yomitanLookupNavigationMode || 'stacked';
@@ -402,12 +407,13 @@ export const YomitanPopup = () => {
         const maxWidthBase = Math.max(POPUP_MIN_WIDTH_PX, (viewportWidth - POPUP_GAP * 2) / popupScale);
         const baseWidth = Math.min(popupWidthPx, maxWidthBase);
         const maxHeightViewport = Math.max(120, (viewportHeight - POPUP_GAP * 2) / popupScale);
-        const baseMaxHeight = Math.min(popupHeightPx, maxHeightViewport);
+        const compactHeightCap = viewportWidth <= 600
+            ? viewportHeight * MOBILE_POPUP_MAX_HEIGHT_FRACTION / popupScale
+            : POPUP_MAX_HEIGHT_PX;
+        const baseMaxHeight = Math.min(popupHeightPx, maxHeightViewport, compactHeightCap);
         const popupWidth = popupEl?.offsetWidth || baseWidth;
         const measuredHeight = popupEl?.offsetHeight || 0;
-        const popupHeight = measuredHeight > 0 ? Math.min(measuredHeight, baseMaxHeight) : baseMaxHeight;
         const popupWidthScaled = popupWidth * popupScale;
-        const popupHeightScaled = popupHeight * popupScale;
 
         const selectionRects = (() => {
             const selection = window.getSelection();
@@ -420,54 +426,91 @@ export const YomitanPopup = () => {
                 .filter((rect) => rect.width > 0 && rect.height > 0);
         })();
 
-        const sourceRects = dictPopup.highlight?.rects?.length
+        const fallbackRect = { x: dictPopup.x, y: dictPopup.y, width: 1, height: 1 };
+        const wordRects = dictPopup.highlight?.rects?.length
             ? dictPopup.highlight.rects
             : selectionRects;
-
-        const fallbackRect = { x: dictPopup.x, y: dictPopup.y, width: 1, height: 1 };
-        const rects = sourceRects.length ? sourceRects : [fallbackRect];
-
-        let left = rects[0].x;
-        let top = rects[0].y;
-        let right = rects[0].x + rects[0].width;
-        let bottom = rects[0].y + rects[0].height;
-        for (let i = 1; i < rects.length; i += 1) {
-            const rect = rects[i];
-            left = Math.min(left, rect.x);
-            top = Math.min(top, rect.y);
-            right = Math.max(right, rect.x + rect.width);
-            bottom = Math.max(bottom, rect.y + rect.height);
-        }
-
-        const rightSpace = viewport.right - right - POPUP_GAP;
-        const leftSpace = left - viewport.left - POPUP_GAP;
-        const aboveSpace = top - viewport.top - POPUP_GAP;
-        const belowSpace = viewport.bottom - bottom - POPUP_GAP;
-
         const clamp = (value: number, min: number, max: number) => {
             if (max < min) return min;
             return Math.min(Math.max(value, min), max);
         };
 
-        let finalLeft: number;
-        let finalTop: number;
+        const boundsFor = (rects: typeof wordRects) => {
+            const source = rects.length ? rects : [fallbackRect];
+            let left = source[0].x;
+            let top = source[0].y;
+            let right = source[0].x + source[0].width;
+            let bottom = source[0].y + source[0].height;
+            for (let i = 1; i < source.length; i += 1) {
+                const rect = source[i];
+                left = Math.min(left, rect.x);
+                top = Math.min(top, rect.y);
+                right = Math.max(right, rect.x + rect.width);
+                bottom = Math.max(bottom, rect.y + rect.height);
+            }
+            return { left, top, right, bottom };
+        };
 
-        if (rightSpace >= popupWidthScaled) {
-            finalLeft = right + POPUP_GAP;
-            finalTop = top;
-        } else if (leftSpace >= popupWidthScaled) {
-            finalLeft = left - POPUP_GAP - popupWidthScaled;
-            finalTop = top;
-        } else {
-            const placeBelow = belowSpace >= popupHeightScaled || belowSpace >= aboveSpace;
-            finalTop = placeBelow ? bottom + POPUP_GAP : top - POPUP_GAP - popupHeightScaled;
-            finalLeft = left;
-        }
+        const placeAround = (rects: typeof wordRects) => {
+            const bounds = boundsFor(rects);
+            const rightSpace = viewport.right - bounds.right - POPUP_GAP;
+            const leftSpace = bounds.left - viewport.left - POPUP_GAP;
+            const aboveSpace = bounds.top - viewport.top - POPUP_GAP;
+            const belowSpace = viewport.bottom - bounds.bottom - POPUP_GAP;
+            const measuredBaseHeight = measuredHeight > 0 ? Math.min(measuredHeight, baseMaxHeight) : baseMaxHeight;
+            const measuredHeightScaled = measuredBaseHeight * popupScale;
 
-        finalLeft = clamp(finalLeft, viewport.left + POPUP_GAP, viewport.right - popupWidthScaled - POPUP_GAP);
-        finalTop = clamp(finalTop, viewport.top + POPUP_GAP, viewport.bottom - popupHeightScaled - POPUP_GAP);
+            if (rightSpace >= popupWidthScaled) {
+                return { left: bounds.right + POPUP_GAP, top: bounds.top, maxHeight: baseMaxHeight };
+            }
+            if (leftSpace >= popupWidthScaled) {
+                return {
+                    left: bounds.left - POPUP_GAP - popupWidthScaled,
+                    top: bounds.top,
+                    maxHeight: baseMaxHeight,
+                };
+            }
 
-        setPosStyle({ top: finalTop, left: finalLeft, maxHeight: `${baseMaxHeight}px`, width: `${baseWidth}px` });
+            const placeBelow = belowSpace >= aboveSpace;
+            const availableHeight = placeBelow ? belowSpace : aboveSpace;
+            const minimumHeightScaled = Math.min(120, baseMaxHeight) * popupScale;
+            if (availableHeight < minimumHeightScaled) return null;
+
+            const fittedBaseHeight = Math.min(baseMaxHeight, availableHeight / popupScale);
+            const fittedHeightScaled = Math.min(measuredHeightScaled, fittedBaseHeight * popupScale);
+            return {
+                left: bounds.left,
+                top: placeBelow ? bounds.bottom + POPUP_GAP : bounds.top - POPUP_GAP - fittedHeightScaled,
+                maxHeight: fittedBaseHeight,
+            };
+        };
+
+        // Keep lookup lightweight: protect only the selected word, not its entire OCR block.
+        const placement = placeAround(wordRects) ??
+            placeAround([fallbackRect]) ?? {
+                left: fallbackRect.x + POPUP_GAP,
+                top: fallbackRect.y + POPUP_GAP,
+                maxHeight: baseMaxHeight,
+            };
+        const popupHeight = Math.min(measuredHeight || placement.maxHeight, placement.maxHeight);
+        const popupHeightScaled = popupHeight * popupScale;
+        const finalLeft = clamp(
+            placement.left,
+            viewport.left + POPUP_GAP,
+            viewport.right - popupWidthScaled - POPUP_GAP,
+        );
+        const finalTop = clamp(
+            placement.top,
+            viewport.top + POPUP_GAP,
+            viewport.bottom - popupHeightScaled - POPUP_GAP,
+        );
+
+        setPosStyle({
+            top: finalTop,
+            left: finalLeft,
+            maxHeight: `${placement.maxHeight}px`,
+            width: `${baseWidth}px`,
+        });
     }, [
         dictPopup.visible,
         dictPopup.x,
@@ -479,49 +522,38 @@ export const YomitanPopup = () => {
     ]);
 
     useLayoutEffect(() => {
-        const el = backdropRef.current;
-        if (!el || !dictPopup.visible) return;
+        const element = backdropRef.current;
+        if (!element || !dictPopup.visible) return undefined;
 
-        const closePopup = () => {
-            window.getSelection()?.removeAllRanges();
-            notifyPopupClosed();
-            setDictPopup(prev => ({ ...prev, visible: false }));
+        const onTouchStart = (event: TouchEvent) => {
+            if (event.cancelable) event.preventDefault();
+            event.stopPropagation();
         };
-
-        const onTouchStart = (e: TouchEvent) => {
-            if (e.cancelable) e.preventDefault();
-            e.stopPropagation();
-        };
-
-        const onTouchEnd = (e: TouchEvent) => {
-            if (e.cancelable) e.preventDefault();
-            e.stopPropagation();
+        const onTouchEnd = (event: TouchEvent) => {
+            if (event.cancelable) event.preventDefault();
+            event.stopPropagation();
             closePopup();
         };
-
-        const onClick = (e: MouseEvent) => {
-            e.stopPropagation();
+        const onClick = (event: MouseEvent) => {
+            event.stopPropagation();
             closePopup();
         };
+        const onBlock = (event: Event) => event.stopPropagation();
+        const options = { passive: false };
 
-        const onBlock = (e: Event) => e.stopPropagation();
-
-        const opts = { passive: false };
-
-        el.addEventListener('touchstart', onTouchStart, opts);
-        el.addEventListener('touchend', onTouchEnd, opts);
-        el.addEventListener('click', onClick, opts);
-        el.addEventListener('mousedown', onBlock, opts);
-        el.addEventListener('contextmenu', onClick, opts);
-
+        element.addEventListener('touchstart', onTouchStart, options);
+        element.addEventListener('touchend', onTouchEnd, options);
+        element.addEventListener('click', onClick, options);
+        element.addEventListener('mousedown', onBlock, options);
+        element.addEventListener('contextmenu', onClick, options);
         return () => {
-            el.removeEventListener('touchstart', onTouchStart, opts as any);
-            el.removeEventListener('touchend', onTouchEnd, opts as any);
-            el.removeEventListener('click', onClick, opts as any);
-            el.removeEventListener('mousedown', onBlock, opts as any);
-            el.removeEventListener('contextmenu', onClick, opts as any);
+            element.removeEventListener('touchstart', onTouchStart, options);
+            element.removeEventListener('touchend', onTouchEnd, options);
+            element.removeEventListener('click', onClick, options);
+            element.removeEventListener('mousedown', onBlock, options);
+            element.removeEventListener('contextmenu', onClick, options);
         };
-    }, [dictPopup.visible, setDictPopup, notifyPopupClosed]);
+    }, [closePopup, dictPopup.visible]);
 
     if (!dictPopup.visible) return null;
 
@@ -534,10 +566,11 @@ export const YomitanPopup = () => {
         maxWidth: `calc((100% - ${POPUP_GAP * 2}px) / ${popupScale})`,
         overflowY: 'auto',
         backgroundColor: theme.bg, color: theme.fg, border: `1px solid ${theme.border}`,
-        borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-        padding: '16px', fontFamily: 'sans-serif', fontSize: '14px', lineHeight: '1.5',
+        borderRadius: '10px', boxShadow: '0 6px 18px rgba(0,0,0,0.34)',
+        padding: '10px 12px 8px', fontFamily: 'sans-serif', fontSize: '13px', lineHeight: '1.35',
         transform: `scale(${popupScale})`,
         transformOrigin: 'top left',
+        animation: 'lookup-popup-in 120ms ease-out',
         ...posStyle
     };
 
@@ -549,7 +582,8 @@ export const YomitanPopup = () => {
                 ref={backdropRef}
                 className="yomitan-backdrop"
                 style={{
-                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    position: 'fixed',
+                    inset: 0,
                     zIndex: 2147483646,
                     cursor: 'default',
                     outline: 'none',
@@ -557,20 +591,19 @@ export const YomitanPopup = () => {
                     touchAction: 'none',
                 }}
             />
-
-            <div
-                ref={popupRef}
-                tabIndex={0}
-                className={`yomitan-popup ${settings.yomitanPopupTheme === 'dark' ? 'yomitan-popup-dark' : 'yomitan-popup-light'}`}
-                style={{
-                    ...popupStyle,
-                    outline: 'none',
-                }}
-                onMouseDown={e => e.stopPropagation()}
-                onTouchStart={e => e.stopPropagation()}
-                onClick={e => e.stopPropagation()}
-                onWheel={e => e.stopPropagation()}
-            >
+            {!isLoading && <div
+                    ref={popupRef}
+                    tabIndex={0}
+                    className={`yomitan-popup ${settings.yomitanPopupTheme === 'dark' ? 'yomitan-popup-dark' : 'yomitan-popup-light'}`}
+                    style={{
+                        ...popupStyle,
+                        outline: 'none',
+                    }}
+                    onMouseDown={e => e.stopPropagation()}
+                    onTouchStart={e => e.stopPropagation()}
+                    onClick={e => e.stopPropagation()}
+                    onWheel={e => e.stopPropagation()}
+                >
                 {(navMode === 'tabs' ? history.length > 1 : historyIndex > 0) && (
                     <div className="lookup-history-nav" style={{ marginBottom: '8px' }}>
                         {navMode === 'tabs' ? (
@@ -638,8 +671,9 @@ export const YomitanPopup = () => {
                     popupTheme={theme}
                     kanjiResults={currentEntry?.isKanjiOnly || processedEntries.length === 0 || settings.yomitanShowKanjiInNormalLookup ? kanjiResults : []}
                     grouped={settings.resultGroupingMode === 'grouped'}
+                    onDismiss={closePopup}
                 />
-            </div>
+                </div>}
         </>,
         document.body
     );

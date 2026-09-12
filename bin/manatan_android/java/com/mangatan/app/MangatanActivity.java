@@ -1,37 +1,77 @@
-package com.mangatan.app;
+package dev.local.mangareader;
 
 import android.app.NativeActivity;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.widget.Toast;
 
 public class MangatanActivity extends NativeActivity {
-
-    static {
-        System.loadLibrary("manatan_android");
-    }
+    private static volatile boolean runtimeHostAlive;
+    private final Handler webviewHandler = new Handler(Looper.getMainLooper());
+    private final Runnable ensureWebviewVisible = () -> {
+        if (!isFinishing() && !WebviewActivity.isVisible()) {
+            launchMainWebview();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        runtimeHostAlive = true;
         handleLaunchIntent(getIntent());
         AnkiBridge.startAnkiConnectServer(getApplicationContext());
+    }
+
+    public static boolean isRuntimeHostAlive() {
+        return runtimeHostAlive;
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleLaunchIntent(intent);
+        if (!handleLaunchIntent(intent)) {
+            launchMainWebview();
+        }
     }
 
-    private void handleLaunchIntent(Intent intent) {
-        if (intent == null || intent.getData() == null) return;
+    @Override
+    protected void onResume() {
+        super.onResume();
+        webviewHandler.removeCallbacks(ensureWebviewVisible);
+        webviewHandler.postDelayed(ensureWebviewVisible, 250);
+    }
+
+    @Override
+    protected void onPause() {
+        webviewHandler.removeCallbacks(ensureWebviewVisible);
+        super.onPause();
+    }
+
+    private void launchMainWebview() {
+        Intent webIntent = new Intent(this, WebviewActivity.class);
+        String recoveryUrl = getSharedPreferences("runtime_recovery", MODE_PRIVATE)
+                .getString("target_url", null);
+        if (recoveryUrl != null) {
+            getSharedPreferences("runtime_recovery", MODE_PRIVATE)
+                    .edit()
+                    .remove("target_url")
+                    .apply();
+        }
+        webIntent.putExtra("TARGET_URL", recoveryUrl == null ? "http://127.0.0.1:14568" : recoveryUrl);
+        webIntent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        startActivity(webIntent);
+    }
+
+    private boolean handleLaunchIntent(Intent intent) {
+        if (intent == null || intent.getData() == null) return false;
         
         Uri data = intent.getData();
-        if (("mangatan".equals(data.getScheme()) || "manatan".equals(data.getScheme()))
+        if ("mangareaderfork".equals(data.getScheme())
                 && "launch".equals(data.getHost())) {
             String targetUrl = data.getQueryParameter("url");
             
@@ -48,16 +88,16 @@ public class MangatanActivity extends NativeActivity {
                 
                 webIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 startActivity(webIntent);
+                return true;
             }
         }
+        return false;
     }
 
     @Override
     public void onDestroy() {
-        AnkiBridge.stopAnkiConnectServer();
-        Intent serviceIntent = new Intent(this, MangatanService.class);
-        stopService(serviceIntent);
-        android.os.Process.killProcess(android.os.Process.myPid());
-        System.exit(0);
+        webviewHandler.removeCallbacks(ensureWebviewVisible);
+        runtimeHostAlive = false;
+        super.onDestroy();
     }
 }

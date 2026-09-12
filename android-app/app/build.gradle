@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.local.mangareader'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+
+    defaultConfig {
+        applicationId 'dev.local.mangareader'
+        minSdk 26
+        targetSdk 36
+        versionCode 16777509
+        versionName '0.2.36-stats-sessions'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('CARGO_APK_RELEASE_KEYSTORE'))
+            storePassword System.getenv('CARGO_APK_RELEASE_KEYSTORE_PASSWORD')
+            keyAlias 'manga-reader-fork'
+            keyPassword System.getenv('CARGO_APK_RELEASE_KEYSTORE_PASSWORD')
+        }
+    }
+
+    buildTypes {
+        release {
+            debuggable false
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/java', '../../bin/manatan_android/java']
+            res.srcDirs = ['../../bin/manatan_android/res']
+            assets.srcDirs = ['../../bin/manatan_android/assets']
+            jniLibs.srcDirs = ['../../target/release/apk/lib']
+        }
+    }
+}
+
+dependencies {
+    // Bundling avoids a first-use model download and keeps page pixels on-device.
+    implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+}

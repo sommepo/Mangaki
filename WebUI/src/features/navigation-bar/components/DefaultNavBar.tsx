@@ -21,14 +21,10 @@ import { useBackButton } from '@/base/hooks/useBackButton.ts';
 import { useGetOptionForDirection } from '@/features/theme/services/ThemeCreator.ts';
 import { MediaQuery } from '@/base/utils/MediaQuery.tsx';
 import { DesktopSideBar } from '@/features/navigation-bar/components/DesktopSideBar.tsx';
-import { AppRoutes } from '@/base/AppRoute.constants.ts';
 import { useResizeObserver } from '@/base/hooks/useResizeObserver.tsx';
 import { MobileBottomBar } from '@/features/navigation-bar/components/MobileBottomBar.tsx';
 import { useNavBarContext } from '@/features/navigation-bar/NavbarContext.tsx';
-import { useMetadataServerSettings } from '@/features/settings/services/ServerSettingsMetadata.ts';
 import { NAVIGATION_BAR_ITEMS } from '@/features/navigation-bar/NavigationBar.constants.ts';
-import { NavigationBarUtil } from '@/features/navigation-bar/NavigationBar.util.ts';
-import { useNavigationSettings } from '@/features/navigation-bar/NavigationBar.hooks.ts';
 import { getVisibleNavBarItems } from '@/features/navigation-bar/DefaultNavBar.util.ts';
 
 export function DefaultNavBar() {
@@ -41,32 +37,21 @@ export function DefaultNavBar() {
     const handleBack = useBackButton();
     const isMobileWidth = MediaQuery.useIsMobileWidth();
 
-    const {
-        settings: { hideHistory },
-    } = useMetadataServerSettings();
-    const { visibleTabs } = useNavigationSettings();
-
     const appBarRef = useRef<HTMLDivElement | null>(null);
 
     const actualNavBarWidth = isMobileWidth || isCollapsed ? 0 : navBarWidth;
 
-    const visibleNavBarItems = useMemo(() => {
-        const items = NavigationBarUtil.filterItems(NAVIGATION_BAR_ITEMS, {
-            hideHistory,
-            hideBoth: false,
-            hideDesktop: isMobileWidth,
-            hideMobile: !isMobileWidth,
-            visibleTabs,
-        });
-
-        // Ensure "More" is always available
-        const moreItem = NAVIGATION_BAR_ITEMS.find((item) => item.path === AppRoutes.more.path);
-        if (moreItem && !items.some((item) => item.path === moreItem.path)) {
-            return [...items, moreItem];
-        }
-
-        return items;
-    }, [isMobileWidth, hideHistory, visibleTabs]);
+    const visibleNavBarItems = useMemo(
+        () =>
+            getVisibleNavBarItems(NAVIGATION_BAR_ITEMS, {
+                hideHistory: false,
+                hideBoth: false,
+                hideDesktop: isMobileWidth,
+                hideMobile: !isMobileWidth,
+                visibleTabs: NAVIGATION_BAR_ITEMS.map(({ path }) => path),
+            }),
+        [isMobileWidth],
+    );
 
     const isMainRoute = useMemo(
         () => visibleNavBarItems.some(({ path }) => path === pathname),
@@ -117,13 +102,16 @@ export function DefaultNavBar() {
                 ref={appBarRef}
                 sx={{
                     position: 'fixed',
+                    bgcolor: '#000',
+                    color: '#fff',
+                    boxShadow: 'none',
                     marginLeft: actualNavBarWidth,
                     pt: 'env(safe-area-inset-top)',
                     width: `calc(100% - ${actualNavBarWidth}px)`,
                     zIndex: theme.zIndex.drawer,
                 }}
             >
-                <Toolbar sx={{ position: 'relative' }}>
+                <Toolbar sx={{ position: 'relative', minHeight: { xs: 64 }, px: { xs: 1.5, sm: 2 } }}>
                     {!isMobileWidth && (
                         <Stack
                             sx={{
@@ -160,12 +148,16 @@ export function DefaultNavBar() {
                             </IconButton>
                         )}
                         <Typography
-                            variant="h5"
+                            variant="h6"
                             component="h1"
                             noWrap
                             sx={{
                                 textOverflow: 'ellipsis',
                                 flexGrow: 1,
+                                textAlign: isMobileWidth ? 'center' : 'left',
+                                fontWeight: 700,
+                                letterSpacing: '-0.02em',
+                                pr: isMobileWidth && !isMainRoute ? 6 : 0,
                             }}
                         >
                             {title}

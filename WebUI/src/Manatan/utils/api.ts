@@ -1,5 +1,6 @@
 import { DictionaryResult, LookupResponse, YomitanLanguage } from '../types';
 import { isNoSpaceLanguage } from '@/Manatan/utils/language';
+import { ForkApi } from '@/features/fork/ForkApi';
 
 export type AuthCredentials = { user?: string; pass?: string };
 
@@ -92,7 +93,10 @@ export const lookupYomitan = async (
         const res = await apiRequest<any>(url);
         
         if (res && res.error === 'loading') return 'loading';
-        if (res && res.terms) return res as LookupResponse;
+        if (res && res.terms) {
+            if (res.terms.length > 0 || res.kanji?.length > 0) ForkApi.recordEvent('dictionary_lookup').catch(() => undefined);
+            return res as LookupResponse;
+        }
         
         return { terms: [], kanji: [] };
     } catch (e) {

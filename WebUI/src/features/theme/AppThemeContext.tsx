@@ -6,7 +6,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import React, { ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, {
+    ReactNode,
+    useCallback,
+    useContext,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Direction, ThemeProvider, useColorScheme } from '@mui/material/styles';
 import { CacheProvider } from '@emotion/react';
@@ -25,12 +34,14 @@ import { AppStorage } from '@/lib/storage/AppStorage.ts';
 import { DIRECTION_TO_CACHE } from '@/features/theme/ThemeDirectionCache.ts';
 import { AppThemes, TAppThemeContext, ThemeMode } from '@/features/theme/AppTheme.types.ts';
 
+const FORK_BLACK_THEME_MIGRATION_KEY = 'manga_reader_black_theme_default_v1';
+
 export const AppThemeContext = React.createContext<TAppThemeContext>({
     appTheme: 'default',
     setAppTheme: (): void => {},
-    themeMode: ThemeMode.SYSTEM,
+    themeMode: ThemeMode.DARK,
     setThemeMode: (): void => {},
-    shouldUsePureBlackMode: false,
+    shouldUsePureBlackMode: true,
     setShouldUsePureBlackMode: (): void => {},
     dynamicColor: null,
     setDynamicColor: (): void => {},
@@ -45,7 +56,7 @@ const ThemeModeInitializer = ({ children, mode }: { children: ReactNode; mode: T
         setMode(mode);
     }, [mode, setMode]);
 
-    return <>{children}</>;
+    return children;
 };
 
 export const AppThemeContextProvider = ({ children }: { children: ReactNode }) => {
@@ -59,9 +70,10 @@ export const AppThemeContextProvider = ({ children }: { children: ReactNode }) =
         getTheme(serverAppTheme, customThemes),
     );
     const [pendingAppTheme, setPendingAppTheme] = useState<AppThemes | null>(null);
-    const [localThemeMode] = useLocalStorage(MUI_THEME_MODE_KEY, ThemeMode.LIGHT);
+    const [localThemeMode] = useLocalStorage(MUI_THEME_MODE_KEY, ThemeMode.DARK);
 
     const directionRef = useRef<Direction>('ltr');
+    const blackThemeMigrationStarted = useRef(false);
 
     const [systemThemeMode, setSystemThemeMode] = useState<ThemeMode>(MediaQuery.getSystemThemeMode());
     const [dynamicColor, setDynamicColor] = useState<TAppThemeContext['dynamicColor']>(null);
@@ -76,6 +88,20 @@ export const AppThemeContextProvider = ({ children }: { children: ReactNode }) =
     const updateSetting = createUpdateMetadataServerSettings<'appTheme' | 'themeMode' | 'shouldUsePureBlackMode'>((e) =>
         makeToast(t('global.error.label.failed_to_save_changes'), 'error', getErrorMessage(e)),
     );
+
+    useEffect(() => {
+        if (
+            !areMetadataServerSettingsReady ||
+            blackThemeMigrationStarted.current ||
+            AppStorage.local.getItem(FORK_BLACK_THEME_MIGRATION_KEY)
+        )
+            return;
+        blackThemeMigrationStarted.current = true;
+        const updates: Promise<void | void[]>[] = [];
+        if (themeMode === ThemeMode.SYSTEM) updates.push(updateSetting('themeMode', ThemeMode.DARK));
+        if (!shouldUsePureBlackMode) updates.push(updateSetting('shouldUsePureBlackMode', true));
+        Promise.all(updates).then(() => AppStorage.local.setItem(FORK_BLACK_THEME_MIGRATION_KEY, 'done'));
+    }, [areMetadataServerSettingsReady, shouldUsePureBlackMode, themeMode, updateSetting]);
 
     const applyAppTheme = useCallback(
         (value: AppThemes) => {
@@ -148,7 +174,7 @@ export const AppThemeContextProvider = ({ children }: { children: ReactNode }) =
     }, [theme.palette.background.default]);
 
     useEffect(() => {
-        const mode = theme.palette.mode;
+        const { mode } = theme.palette;
         document.documentElement.style.colorScheme = mode;
     }, [theme.palette.mode]);
 
@@ -161,9 +187,7 @@ export const AppThemeContextProvider = ({ children }: { children: ReactNode }) =
         <AppThemeContext.Provider value={appThemeContext}>
             <CacheProvider value={DIRECTION_TO_CACHE[currentDirection]}>
                 <ThemeProvider theme={theme}>
-                    <ThemeModeInitializer mode={actualThemeMode as ThemeMode}>
-                        {children}
-                    </ThemeModeInitializer>
+                    <ThemeModeInitializer mode={actualThemeMode as ThemeMode}>{children}</ThemeModeInitializer>
                 </ThemeProvider>
             </CacheProvider>
         </AppThemeContext.Provider>

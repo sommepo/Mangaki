@@ -10,6 +10,27 @@ export const useMangaObserver = () => {
 
         const scan = () => {
             const found: HTMLImageElement[] = [];
+            document.querySelectorAll<HTMLImageElement>('img.manatan-reader-page').forEach((img) => found.push(img));
+            const forkReaderPages = Array.from(document.querySelectorAll<HTMLImageElement>('img.fork-reader-page'));
+
+            if (forkReaderPages.length > 0) {
+                const viewportBuffer = window.innerHeight * 2;
+                const nearbyPages = forkReaderPages.filter((img) => {
+                    if (!img.isConnected || img.naturalHeight <= 200) return false;
+                    const rect = img.getBoundingClientRect();
+                    return rect.bottom >= -viewportBuffer && rect.top <= window.innerHeight + viewportBuffer;
+                });
+                setImages((previous) => {
+                    if (
+                        previous.length === nearbyPages.length &&
+                        previous.every((img, index) => img === nearbyPages[index])
+                    ) {
+                        return previous;
+                    }
+                    return nearbyPages;
+                });
+                return;
+            }
 
             selectors.forEach((sel) => {
                 const nodes = document.querySelectorAll(sel);
@@ -27,8 +48,17 @@ export const useMangaObserver = () => {
 
             const unique = Array.from(new Set(found)).filter((img) => {
                 if (!img.isConnected || img.naturalHeight <= 200) return false;
-                
+
                 if (img.src.includes('thumbnail')) return false;
+                if (img.classList.contains('fork-reader-thumbnail')) return false;
+                // Fork cover images and reader pages share the same API URL prefix.
+                // The standard Manatan reader explicitly marks its full-size pages,
+                // so retain those while continuing to keep library covers out of OCR.
+                if (
+                    img.src.includes('/api/fork/volumes/') &&
+                    !img.classList.contains('manatan-reader-page')
+                )
+                    return false;
 
                 // Exclude cropper images
                 if (img.closest('.ReactCrop')) {
@@ -51,8 +81,34 @@ export const useMangaObserver = () => {
         });
 
         observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+        document.addEventListener('load', scan, true);
+        let scheduledScan = 0;
+        const scheduleScan = () => {
+            if (scheduledScan) return;
+            scheduledScan = window.requestAnimationFrame(() => {
+                scheduledScan = 0;
+                scan();
+            });
+        };
+        window.addEventListener('scroll', scheduleScan, { capture: true, passive: true });
+        window.addEventListener('resize', scheduleScan, { passive: true });
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') scheduleScan();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('pageshow', scheduleScan);
+        window.addEventListener('focus', scheduleScan);
 
-        return () => observer.disconnect();
+        return () => {
+            observer.disconnect();
+            document.removeEventListener('load', scan, true);
+            window.removeEventListener('scroll', scheduleScan, true);
+            window.removeEventListener('resize', scheduleScan);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.removeEventListener('pageshow', scheduleScan);
+            window.removeEventListener('focus', scheduleScan);
+            if (scheduledScan) window.cancelAnimationFrame(scheduledScan);
+        };
     }, [settings.site, settings.debugMode]);
 
     return images;

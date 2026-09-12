@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Duration};
+use std::{io::Cursor, net::{IpAddr, Ipv4Addr}, time::Duration};
 
 use anyhow::anyhow;
 use chrome_lens_ocr::LensClient;
@@ -178,6 +178,93 @@ pub struct BoundingBox {
     pub rotation: Option<f64>,
 }
 
+#[derive(Deserialize)]
+struct SelfHostedOcrResponse {
+    blocks: Vec<OcrResult>,
+}
+
+pub fn validate_self_hosted_ocr_url(value: &str) -> anyhow::Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(value.trim())
+        .map_err(|_| anyhow!("Enter a valid self-hosted OCR URL"))?;
+    if url.username() != "" || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!("Self-hosted OCR URL must not contain credentials, a query, or a fragment"));
+    }
+    let secure = url.scheme() == "https";
+    let private_http = url.scheme() == "http" && url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host.parse::<IpAddr>().is_ok_and(|address| match address {
+                IpAddr::V4(address) => address.is_loopback() || is_tailscale_ipv4(address),
+                IpAddr::V6(address) => address.is_loopback(),
+            })
+    });
+    if !secure && !private_http {
+        return Err(anyhow!("Use HTTPS, localhost, or a Tailscale 100.64.0.0/10 address"));
+    }
+    url.set_path("/v1/ocr");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn is_tailscale_ipv4(address: Ipv4Addr) -> bool {
+    let value = u32::from(address);
+    let first = u32::from(Ipv4Addr::new(100, 64, 0, 0));
+    let last = u32::from(Ipv4Addr::new(100, 127, 255, 255));
+    value >= first && value <= last
+}
+
+fn validate_self_hosted_blocks(blocks: Vec<OcrResult>, language: OcrLanguage) -> anyhow::Result<Vec<OcrResult>> {
+    if blocks.len() > 2048 {
+        return Err(anyhow!("Self-hosted OCR returned too many text regions"));
+    }
+    let mut validated = Vec::with_capacity(blocks.len());
+    for mut block in blocks {
+        block.text = post_process_text(block.text, language);
+        let bounds = &block.tight_bounding_box;
+        let values = [bounds.x, bounds.y, bounds.width, bounds.height];
+        if block.text.trim().is_empty()
+            || !values.iter().all(|value| value.is_finite())
+            || bounds.x < 0.0
+            || bounds.y < 0.0
+            || bounds.width <= 0.0
+            || bounds.height <= 0.0
+            || bounds.x + bounds.width > 1.001
+            || bounds.y + bounds.height > 1.001
+        {
+            return Err(anyhow!("Self-hosted OCR returned invalid text geometry"));
+        }
+        validated.push(block);
+    }
+    Ok(validated)
+}
+
+async fn self_hosted_ocr(image_bytes: &[u8], base_url: &str, language: OcrLanguage) -> anyhow::Result<Vec<OcrResult>> {
+    const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+    let url = validate_self_hosted_ocr_url(base_url)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(180))
+        .build()?;
+    let response = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(image_bytes.to_vec())
+        .send()
+        .await?
+        .error_for_status()?;
+    if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES) {
+        return Err(anyhow!("Self-hosted OCR response exceeds 8 MiB"));
+    }
+    let body = response.bytes().await?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(anyhow!("Self-hosted OCR response exceeds 8 MiB"));
+    }
+    let response: SelfHostedOcrResponse = serde_json::from_slice(&body)
+        .map_err(|error| anyhow!("Invalid self-hosted OCR response: {error}"))?;
+    validate_self_hosted_blocks(response.blocks, language)
+}
+
 /// Helper to strip the scheme/host/query from the URL for caching purposes.
 pub fn get_cache_key(url: &str, language: Option<OcrLanguage>) -> String {
     let raw = if let Ok(parsed) = reqwest::Url::parse(url) {
@@ -290,6 +377,18 @@ pub async fn fetch_and_process(
     add_space_on_merge: Option<bool>,
     language: OcrLanguage,
 ) -> anyhow::Result<Vec<OcrResult>> {
+    fetch_and_process_with_provider(url, user, pass, add_space_on_merge, language, false, None).await
+}
+
+pub async fn fetch_and_process_with_provider(
+    url: &str,
+    user: Option<String>,
+    pass: Option<String>,
+    add_space_on_merge: Option<bool>,
+    language: OcrLanguage,
+    use_network_provider: bool,
+    self_hosted_url: Option<String>,
+) -> anyhow::Result<Vec<OcrResult>> {
     let mut last_error = anyhow!("Unknown error");
 
     for attempt_number in 1..=3 {
@@ -299,6 +398,8 @@ pub async fn fetch_and_process(
             pass.clone(),
             add_space_on_merge,
             language,
+            use_network_provider,
+            self_hosted_url.clone(),
         )
         .await
         {
@@ -519,13 +620,20 @@ async fn fetch_and_process_internal(
     pass: Option<String>,
     add_space_on_merge: Option<bool>,
     language: OcrLanguage,
+    use_network_provider: bool,
+    self_hosted_url: Option<String>,
 ) -> anyhow::Result<Vec<OcrResult>> {
     // 0. Force URL to Localhost
     let target_url = match reqwest::Url::parse(url) {
         Ok(mut parsed) => {
-            let _ = parsed.set_scheme("http");
-            let _ = parsed.set_host(Some("127.0.0.1"));
-            let _ = parsed.set_port(Some(4568));
+            let is_fork_page = matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+                && parsed.port() == Some(14568)
+                && parsed.path().starts_with("/api/fork/");
+            if !is_fork_page {
+                let _ = parsed.set_scheme("http");
+                let _ = parsed.set_host(Some("127.0.0.1"));
+                let _ = parsed.set_port(Some(4568));
+            }
             parsed.to_string()
         }
         Err(_) => url.to_string(),
@@ -543,6 +651,39 @@ async fn fetch_and_process_internal(
         .error_for_status()
         .map_err(|err| anyhow!("Failed error_for_status (URL: {target_url}): {err:?}"))?;
     let image_bytes = response.bytes().await?.to_vec();
+
+    if let Some(remote_url) = self_hosted_url.as_deref() {
+        return self_hosted_ocr(&image_bytes, remote_url, language).await;
+    }
+
+    // The Android acceptance build uses ML Kit's bundled Japanese model. Page
+    // pixels stay inside this process; unlike the optional Lens path, this call
+    // does not upload the image to an OCR service.
+    #[cfg(target_os = "android")]
+    if !use_network_provider {
+        let mut detected = android_on_device_ocr(&image_bytes)?;
+        let reader = ImageReader::new(Cursor::new(&image_bytes)).with_guessed_format()?;
+        let (width, height) = reader.into_dimensions()?;
+        for result in &mut detected {
+            result.tight_bounding_box.x *= width as f64;
+            result.tight_bounding_box.y *= height as f64;
+            result.tight_bounding_box.width *= width as f64;
+            result.tight_bounding_box.height *= height as f64;
+        }
+        let merge_config = MergeConfig {
+            add_space_on_merge,
+            language,
+            ..MergeConfig::default()
+        };
+        let mut merged = merge::auto_merge(detected, width, height, &merge_config);
+        for result in &mut merged {
+            result.tight_bounding_box.x /= width as f64;
+            result.tight_bounding_box.y /= height as f64;
+            result.tight_bounding_box.width /= width as f64;
+            result.tight_bounding_box.height /= height as f64;
+        }
+        return Ok(merged);
+    }
 
     // 2. Decode & OCR (Wrapped) - now passes user/pass for proxy settings
     let raw_chunks = get_raw_ocr_data(&image_bytes, user, pass, language).await?;
@@ -577,4 +718,59 @@ async fn fetch_and_process_internal(
     }
 
     Ok(final_results)
+}
+
+#[cfg(target_os = "android")]
+fn android_on_device_ocr(image_bytes: &[u8]) -> anyhow::Result<Vec<OcrResult>> {
+    use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
+
+    let android = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) }
+        .map_err(|error| anyhow!("Attach Android OCR VM: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| anyhow!("Attach Android OCR thread: {error}"))?;
+    let context = unsafe { JObject::from_raw(android.context().cast()) };
+    let loader = env
+        .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|value| value.l())
+        .map_err(|error| anyhow!("Load Android OCR class loader: {error}"))?;
+    let name = env
+        .new_string("dev.local.mangareader.OnDeviceOcr")
+        .map_err(|error| anyhow!("Create Android OCR class name: {error}"))?;
+    let class = env
+        .call_method(
+            loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&name)],
+        )
+        .and_then(|value| value.l())
+        .map(JClass::from)
+        .map_err(|error| {
+            let _ = env.exception_clear();
+            anyhow!("Load bundled Japanese OCR bridge: {error}")
+        })?;
+    let bytes: JByteArray = env
+        .byte_array_from_slice(image_bytes)
+        .map_err(|error| anyhow!("Copy OCR page into Android: {error}"))?;
+    let bytes_obj = JObject::from(bytes);
+    let output = env
+        .call_static_method(
+            class,
+            "recognizeJapanese",
+            "([B)Ljava/lang/String;",
+            &[JValue::Object(&bytes_obj)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| {
+            let _ = env.exception_clear();
+            anyhow!("Bundled Japanese OCR failed: {error}")
+        })?;
+    let output = JString::from(output);
+    let json: String = env
+        .get_string(&output)
+        .map_err(|error| anyhow!("Read Android OCR response: {error}"))?
+        .into();
+    serde_json::from_str(&json).map_err(|error| anyhow!("Validate Android OCR response: {error}"))
 }

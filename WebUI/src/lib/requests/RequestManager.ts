@@ -408,11 +408,23 @@ export const SPECIAL_ED_SOURCES = {
 export class RequestManager {
     public static readonly API_VERSION = '/api/v1/';
 
+    private static readonly FORK_READER_ID_PREFIX = 'fork:';
+
     private readonly restClient: RestClient = new RestClient(this.refreshUser.bind(this));
 
     private readonly cache = new CustomCache();
 
     private readonly imageQueue: SourceAwareQueue;
+
+    private readonly forkReaderVolumesByMangaId = new Map<
+        number,
+        { volumeId: string; seriesId: string; pageCount: number; fingerprint: string; progressPage: number }
+    >();
+
+    private readonly forkReaderVolumesByChapterId = new Map<
+        number,
+        { volumeId: string; seriesId: string; pageCount: number; fingerprint: string; progressPage: number }
+    >();
 
     private serverSettingsSnapshot?: GetServerSettingsQuery;
 
@@ -445,6 +457,89 @@ export class RequestManager {
 
     public getClient(): IRestClient {
         return this.restClient;
+    }
+
+    public getForkReaderId(volumeId: string): string {
+        return `${RequestManager.FORK_READER_ID_PREFIX}${volumeId}`;
+    }
+
+    public getForkReaderChapterId(volumeId: string): number {
+        return this.getStableForkId('chapter', volumeId);
+    }
+
+    public getForkReaderVolumeId(chapterId: number): string | undefined {
+        return this.forkReaderVolumesByChapterId.get(chapterId)?.volumeId;
+    }
+
+    private getForkVolumeId(mangaId: number | string): string | undefined {
+        if (typeof mangaId !== 'string' || !mangaId.startsWith(RequestManager.FORK_READER_ID_PREFIX)) {
+            return undefined;
+        }
+
+        return mangaId.slice(RequestManager.FORK_READER_ID_PREFIX.length);
+    }
+
+    private getStableForkId(kind: 'manga' | 'chapter', value: string): number {
+        let hash = 0;
+        const input = `${kind}:${value}`;
+        for (let index = 0; index < input.length; index += 1) {
+            hash = (hash * 31 + input.charCodeAt(index)) % 1_000_000_000;
+        }
+
+        return 1_000_000_000 + hash;
+    }
+
+    private getForkProgressPage(
+        volume: { pageCount: number; progressPage: number },
+        patch: Pick<UpdateChapterPatchInput, 'isRead' | 'lastPageRead'>,
+    ): number {
+        if (patch.isRead === true) return Math.max(0, volume.pageCount - 1);
+        if (patch.isRead === false) return 0;
+        return Math.max(0, Math.min(patch.lastPageRead ?? volume.progressPage, volume.pageCount - 1));
+    }
+
+    private async getForkReaderData(volumeId: string, signal: AbortSignal) {
+        const response = await this.restClient.fetcher('/api/fork/catalogue', { config: { signal } });
+        const catalogue = (await response.json()) as Array<{
+            id: string;
+            sourceId: string;
+            title: string;
+            volumes: Array<{
+                id: string;
+                title: string;
+                pageCount: number;
+                fingerprint: string;
+                progressPage: number;
+                downloadState: string;
+            }>;
+        }>;
+        const series = catalogue.find((candidate) => candidate.volumes.some((volume) => volume.id === volumeId));
+        const volume = series?.volumes.find((candidate) => candidate.id === volumeId);
+        if (!series || !volume) {
+            throw new Error('This volume is hidden or no longer available.');
+        }
+
+        const mangaId = this.getStableForkId('manga', series.id);
+        const chapterId = this.getStableForkId('chapter', volume.id);
+        const mappings = series.volumes.map((candidate) => ({
+            volumeId: candidate.id,
+            seriesId: series.id,
+            pageCount: candidate.pageCount,
+            fingerprint: candidate.fingerprint,
+            progressPage: candidate.progressPage,
+        }));
+        for (const mapping of mappings) {
+            this.forkReaderVolumesByChapterId.set(
+                this.getStableForkId('chapter', mapping.volumeId),
+                mapping,
+            );
+        }
+        this.forkReaderVolumesByMangaId.set(
+            mangaId,
+            mappings.find((candidate) => candidate.volumeId === volume.id)!,
+        );
+
+        return { series, volume, mangaId, chapterId };
     }
 
     public updateClient(config: RequestInit): void {
@@ -2939,15 +3034,42 @@ export class RequestManager {
         options?: QueryHookOptions<GetMangaReaderQuery, GetMangaReaderQueryVariables>,
     ): AbortableApolloUseQueryResponse<GetMangaReaderQuery, GetMangaReaderQueryVariables> {
         const skip = options?.skip ?? false;
-        const id = Number(mangaId);
+        const forkVolumeId = this.getForkVolumeId(mangaId);
+        const id = forkVolumeId ? this.getStableForkId('manga', forkVolumeId) : Number(mangaId);
         return this.useRestQuery(
             async (signal) => {
+                if (forkVolumeId) {
+                    const { series, volume, mangaId: forkMangaId } = await this.getForkReaderData(
+                        forkVolumeId,
+                        signal,
+                    );
+                    return {
+                        manga: this.normalizeMangaPayload({
+                            id: forkMangaId,
+                            title: series.title,
+                            thumbnailUrl: `/api/fork/volumes/${encodeURIComponent(volume.id)}/pages/0?fingerprint=${encodeURIComponent(volume.fingerprint)}`,
+                            thumbnailUrlLastFetched: null,
+                            inLibrary: true,
+                            initialized: true,
+                            sourceId: `fork:${series.id}`,
+                            source: {
+                                id: `fork:${series.sourceId}`,
+                                name: 'Mangaki library',
+                                displayName: 'Mangaki library',
+                                lang: 'ja',
+                            },
+                            meta: [],
+                            chapters: { totalCount: series.volumes.length },
+                            trackRecords: { totalCount: 0, nodes: [] },
+                        }),
+                    } as GetMangaReaderQuery;
+                }
                 const response = await this.restClient.fetcher(`/api/v1/manga/${id}`, { config: { signal } });
                 const payload = await response.json();
                 const manga = this.normalizeMangaPayload(payload?.manga ?? payload);
                 return { manga } as GetMangaReaderQuery;
             },
-            [id, skip],
+            [id, forkVolumeId, skip],
             { ...options, skip },
         );
     }
@@ -3359,9 +3481,41 @@ export class RequestManager {
         options?: QueryHookOptions<GetChaptersReaderQuery, GetChaptersReaderQueryVariables>,
     ): AbortableApolloUseQueryResponse<GetChaptersReaderQuery, GetChaptersReaderQueryVariables> {
         const skip = options?.skip ?? false;
-        const id = Number(mangaId);
+        const forkVolumeId = this.getForkVolumeId(mangaId);
+        const id = forkVolumeId ? this.getStableForkId('manga', forkVolumeId) : Number(mangaId);
         return this.useRestQuery(
             async (signal) => {
+                if (forkVolumeId) {
+                    const { series, mangaId: forkMangaId } = await this.getForkReaderData(
+                        forkVolumeId,
+                        signal,
+                    );
+                    const chapters = series.volumes
+                        .map((volume, index) => ({
+                            uploadDate: new Date(0).toISOString(),
+                            lastPageRead: Math.min(volume.progressPage, Math.max(0, volume.pageCount - 1)),
+                            pageCount: volume.pageCount,
+                            id: this.getStableForkId('chapter', volume.id),
+                            name: volume.title,
+                            mangaId: forkMangaId,
+                            scanlator: null,
+                            realUrl: null,
+                            sourceOrder: index + 1,
+                            chapterNumber: index + 1,
+                            isRead: volume.pageCount > 0 && volume.progressPage >= volume.pageCount - 1,
+                            isDownloaded: volume.downloadState === 'downloaded',
+                            isBookmarked: false,
+                        }))
+                        // Reader chapter lists are newest-to-oldest.
+                        .reverse();
+                    return {
+                        chapters: {
+                            nodes: chapters,
+                            totalCount: chapters.length,
+                            pageInfo: this.buildPageInfo(),
+                        },
+                    } as GetChaptersReaderQuery;
+                }
                 const response = await this.restClient.fetcher(`/api/v1/manga/${id}/chapters`, { config: { signal } });
                 const payload = await response.json();
                 const rawNodes = Array.isArray(payload) ? payload : payload?.chapters ?? payload?.nodes ?? [];
@@ -3379,7 +3533,7 @@ export class RequestManager {
                     },
                 } as GetChaptersReaderQuery;
             },
-            [id, skip],
+            [id, forkVolumeId, skip],
             { ...options, skip },
         );
     }
@@ -3523,6 +3677,23 @@ export class RequestManager {
             const resolvedMangaId = Number(mangaId);
             const resolvedChapterIndex = Number(chapterIndex);
             const resolvedChapterId = Number(variables?.input?.chapterId ?? chapterId ?? -1);
+            const forkVolume =
+                this.forkReaderVolumesByChapterId.get(resolvedChapterId) ??
+                this.forkReaderVolumesByMangaId.get(resolvedMangaId);
+            if (forkVolume) {
+                const pages = Array.from({ length: forkVolume.pageCount }, (_, page) =>
+                    `/api/fork/volumes/${encodeURIComponent(forkVolume.volumeId)}/pages/${page}?fingerprint=${encodeURIComponent(forkVolume.fingerprint)}`,
+                );
+                return {
+                    fetchChapterPages: {
+                        pages,
+                        chapter: {
+                            id: resolvedChapterId,
+                            pageCount: pages.length,
+                        },
+                    },
+                } as GetChapterPagesFetchMutation;
+            }
             const response = await this.restClient.fetcher(
                 `/api/v1/manga/${resolvedMangaId}/chapter/${resolvedChapterIndex}/pages`,
                 { config: { signal } },
@@ -3593,6 +3764,29 @@ export class RequestManager {
         const { chapterIdToDelete = -1, trackProgressMangaId = -1, ...updatePatch } = patch;
         const trackProgressMangaIdPayload = trackProgressMangaId !== -1 ? trackProgressMangaId : undefined;
         return this.doRestMutation(async (signal) => {
+            const forkVolume = this.forkReaderVolumesByChapterId.get(id);
+            if (forkVolume) {
+                const page = this.getForkProgressPage(forkVolume, updatePatch);
+                await this.restClient.fetcher(
+                    `/api/fork/volumes/${encodeURIComponent(forkVolume.volumeId)}/progress`,
+                    {
+                        httpMethod: HttpMethod.PUT,
+                        data: { page },
+                        config: { signal },
+                    },
+                );
+                forkVolume.progressPage = page;
+                return {
+                    updateChapter: {
+                        chapter: {
+                            id,
+                            isBookmarked: false,
+                            isRead: page >= forkVolume.pageCount - 1,
+                            lastPageRead: page,
+                        },
+                    },
+                } as UpdateChapterMutation;
+            }
             await this.restClient.fetcher('/api/v1/chapters/update', {
                 httpMethod: HttpMethod.POST,
                 data: {
@@ -3665,6 +3859,10 @@ export class RequestManager {
     }
 
     public getChapterPageUrl(mangaId: number | string, chapterIndex: number | string, page: number): string {
+        const forkVolume = this.forkReaderVolumesByMangaId.get(Number(mangaId));
+        if (forkVolume) {
+            return `/api/fork/volumes/${encodeURIComponent(forkVolume.volumeId)}/pages/${page}?fingerprint=${encodeURIComponent(forkVolume.fingerprint)}`;
+        }
         return this.getValidImgUrlFor(
             `manga/${mangaId}/chapter/${chapterIndex}/page/${page}`,
             RequestManager.API_VERSION,
@@ -3684,6 +3882,39 @@ export class RequestManager {
         const trackProgressMangaIdPayload = trackProgressMangaId !== -1 ? trackProgressMangaId : undefined;
 
         return this.doRestMutation(async (signal) => {
+            const forkVolumes = ids.map((id) => this.forkReaderVolumesByChapterId.get(id));
+            if (forkVolumes.every((volume) => volume !== undefined)) {
+                await Promise.all(
+                    ids.map(async (_id, index) => {
+                        const volume = forkVolumes[index]!;
+                        const page = this.getForkProgressPage(volume, updatePatch);
+                        await this.restClient.fetcher(
+                            `/api/fork/volumes/${encodeURIComponent(volume.volumeId)}/progress`,
+                            {
+                                httpMethod: HttpMethod.PUT,
+                                data: { page },
+                                config: { signal },
+                            },
+                        );
+                        volume.progressPage = page;
+                    }),
+                );
+                return {
+                    updateChapters: {
+                        chapters: ids.map((id, index) => {
+                            const volume = forkVolumes[index]!;
+                            const page = this.getForkProgressPage(volume, updatePatch);
+                            return {
+                                id,
+                                isBookmarked: false,
+                                isRead: page >= volume.pageCount - 1,
+                                lastPageRead: page,
+                                manga: { id: 0, unreadCount: 0, bookmarkCount: 0 },
+                            };
+                        }),
+                    },
+                } as UpdateChaptersMutation;
+            }
             await this.restClient.fetcher('/api/v1/chapters/update', {
                 httpMethod: HttpMethod.POST,
                 data: {

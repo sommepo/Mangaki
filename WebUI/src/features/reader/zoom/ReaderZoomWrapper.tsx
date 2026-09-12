@@ -1,4 +1,4 @@
-import { forwardRef, ReactNode, useRef, useEffect } from 'react';
+import { forwardRef, ReactNode, useCallback, useRef, useEffect } from 'react';
 import Box from '@mui/material/Box';
 import { useMergedRef } from '@mantine/hooks';
 import { useMobileZoomPan } from './useMobileZoomPan';
@@ -21,7 +21,17 @@ export const ReaderZoomWrapper = forwardRef<HTMLDivElement, ReaderZoomWrapperPro
         const contentRef = useRef<HTMLDivElement>(null);
         const mergedRef = useMergedRef(ref, contentRef);
         const { setScale } = useReaderZoom();
-        const { settings } = useOCR();
+        const { settings, setDictPopup } = useOCR();
+
+        const deactivateLookupForZoom = useCallback(() => {
+            window.getSelection()?.removeAllRanges();
+            window.dispatchEvent(new Event('mangaReaderZoomAction'));
+            setDictPopup((current) => (current.visible ? { ...current, visible: false } : current));
+        }, [setDictPopup]);
+
+        const refreshLookupGeometryAfterZoom = useCallback(() => {
+            window.dispatchEvent(new Event('mangaReaderZoomGeometryChanged'));
+        }, []);
 
         const isVertical = isContinuousVerticalReadingMode(readingMode);
         const isRTL = readingDirection === ReadingDirection.RTL;
@@ -36,6 +46,8 @@ export const ReaderZoomWrapper = forwardRef<HTMLDivElement, ReaderZoomWrapperPro
                 isRTL,
                 doubleTapZoomEnabled: settings.enableDoubleTapZoom,
                 onScaleChange: setScale,
+                onZoomStart: deactivateLookupForZoom,
+                onZoomEnd: refreshLookupGeometryAfterZoom,
             }
         );
 

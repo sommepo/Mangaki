@@ -58,7 +58,7 @@ export const TextBox: React.FC<{
         closeDialog,
     } = useOCR();
     const [isEditing, setIsEditing] = useState(false);
-    const [isActive, setIsActive] = useState(false); 
+    const [isActive, setIsActive] = useState(false);
     const [isLocalHover, setIsLocalHover] = useState(false); 
     const [fontSize, setFontSize] = useState(16);
     const [showCropper, setShowCropper] = useState(false);
@@ -67,6 +67,7 @@ export const TextBox: React.FC<{
     const longPressTimer = useRef<number | null>(null);
     const longPressTriggered = useRef(false);
     const touchStartPoint = useRef<{ x: number; y: number } | null>(null);
+    const lookupGeneration = useRef(0);
 
     const justActivated = useRef(false);
     const dictPopupRef = useRef(dictPopup.visible);
@@ -93,6 +94,31 @@ export const TextBox: React.FC<{
             window.removeEventListener('keydown', handleKey);
         };
     }, [contextMenu]);
+
+    useEffect(() => {
+        const deactivateForZoom = () => {
+            lookupGeneration.current += 1;
+            if (longPressTimer.current) {
+                window.clearTimeout(longPressTimer.current);
+                longPressTimer.current = null;
+            }
+            touchStartPoint.current = null;
+            longPressTriggered.current = false;
+            justActivated.current = false;
+            setContextMenu(null);
+            setIsEditing(false);
+            setIsActive(false);
+            setIsLocalHover(false);
+            setMergeAnchor(null);
+            window.getSelection()?.removeAllRanges();
+        };
+        window.addEventListener('mangaReaderZoomAction', deactivateForZoom);
+        return () => window.removeEventListener('mangaReaderZoomAction', deactivateForZoom);
+    }, [setMergeAnchor]);
+
+    useEffect(() => () => {
+        lookupGeneration.current += 1;
+    }, []);
 
     const prefersVertical =
         settings.yomitanLanguage === 'japanese'
@@ -126,13 +152,6 @@ export const TextBox: React.FC<{
     const activeBgColor = isDarkTheme 
         ? '#2d3436' 
         : (isWhiteTheme ? '#ffffff' : theme.background);
-
-    // Border Logic
-    // White/Dark themes: use a neutral gray border unless active
-    // Colored themes: Always use accent color for border (as per request to not use gray)
-    const borderColor = (isWhiteTheme || isDarkTheme) 
-        ? theme.accent 
-        : theme.accent;
 
     const handleMouseUpFix = (e: React.MouseEvent) => {
         if (settings.mobileMode) return; 
@@ -184,6 +203,11 @@ export const TextBox: React.FC<{
         const selection = window.getSelection();
         if (!selection) return;
 
+        if (settings.ocrBoxlessMode) {
+            selection.removeAllRanges();
+            return;
+        }
+
         if (!dictPopup.visible) {
             if (isActive) selection.removeAllRanges();
             return;
@@ -211,7 +235,7 @@ export const TextBox: React.FC<{
                 // Silently fail
             }
         }
-    }, [dictPopup.visible, dictPopup.highlight, imgSrc, index, displayContent, isActive]);
+    }, [dictPopup.visible, dictPopup.highlight, imgSrc, index, displayContent, isActive, settings.ocrBoxlessMode]);
 
     useEffect(() => {
         if (!isActive || !settings.mobileMode) return;
@@ -352,7 +376,7 @@ export const TextBox: React.FC<{
             const sentField = getTargetField('Sentence');
 
             await updateLastCard(
-                settings.ankiConnectUrl || 'http://127.0.0.1:8765',
+                settings.ankiConnectUrl || 'http://127.0.0.1:18765',
                 croppedImage ? undefined : imgSrc,
                 getCleanSentence(),
                 imgField || '',
@@ -446,7 +470,7 @@ export const TextBox: React.FC<{
             }, 500);
         }, 550);
 
-        if (!isActive) {
+        if (!isActive && !settings.ocrBoxlessMode) {
             setIsActive(true);
             justActivated.current = true;
             setTimeout(() => {
@@ -466,6 +490,7 @@ export const TextBox: React.FC<{
             clearLongPressTimer();
             touchStartPoint.current = null;
             longPressTriggered.current = false;
+            setIsActive(false);
         }
     };
 
@@ -481,7 +506,13 @@ export const TextBox: React.FC<{
 
     const handleInteract = async (e: React.MouseEvent) => {
         const selection = window.getSelection();
-        if (selection && !selection.isCollapsed && !dictPopup.visible) return;
+        if (selection && !selection.isCollapsed && !dictPopup.visible) {
+            // Desktop keeps native drag-selection semantics. On Android a
+            // selection left behind by a cancelled popup or transformed text
+            // node otherwise makes every later OCR click return early.
+            if (!settings.mobileMode) return;
+            selection.removeAllRanges();
+        }
 
         if (isEditing) return;
         e.stopPropagation();
@@ -501,14 +532,12 @@ export const TextBox: React.FC<{
                 setMergeAnchor(null);
             }
         } else {
-            if (settings.mobileMode) {
+            if (settings.mobileMode && !settings.ocrBoxlessMode) {
                 if (!isActive) {
                     setIsActive(true);
                     return;
                 }
-                if (justActivated.current) {
-                    return;
-                }
+                if (justActivated.current) return;
             }
 
             if (!settings.enableYomitan) return;
@@ -565,7 +594,7 @@ export const TextBox: React.FC<{
             const adjustedOffset = Math.max(0, charOffset - ignoredLength);
 
             const byteIndex = encoder.encode(cleanContent.substring(0, adjustedOffset)).length;
-
+            const requestGeneration = ++lookupGeneration.current;
             setDictPopup({
                 visible: true,
                 x: e.clientX,
@@ -585,21 +614,53 @@ export const TextBox: React.FC<{
                 settings.yomitanLanguage
             );
 
+            if (requestGeneration !== lookupGeneration.current) return;
+
+            const stillCurrentLookup = (current: typeof dictPopup) =>
+                current.visible
+                && current.context?.imgSrc === imgSrc
+                && current.context?.sentence === cleanContent;
+
             const loadedResults = results === 'loading' ? [] : ((results as any).terms || results || []);
 
             const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
 
             if (results === 'loading') {
-                 setDictPopup(prev => ({ ...prev, results: [], kanjiResults: [], isLoading: false, systemLoading: true }));
+                 setDictPopup(prev => stillCurrentLookup(prev)
+                     ? { ...prev, results: [], kanjiResults: [], isLoading: false, systemLoading: true }
+                     : prev);
             } else {
-                setDictPopup(prev => ({ 
-                    ...prev, 
-                    results: loadedResults,
-                    kanjiResults: loadedKanji,
-                    isLoading: false, 
-                    systemLoading: false, 
-                    highlight: { imgSrc, index, startChar: charOffset, length: (loadedResults && loadedResults[0]?.matchLen) || 1 }
-                }));
+                const matchLength = (loadedResults && loadedResults[0]?.matchLen) || 1;
+                let rects: Array<{ x: number; y: number; width: number; height: number }> | undefined;
+                const textNode = ref.current?.firstChild;
+                if (textNode?.nodeType === Node.TEXT_NODE) {
+                    try {
+                        const highlightRange = document.createRange();
+                        const textLength = textNode.textContent?.length || 0;
+                        const start = Math.max(0, Math.min(charOffset, textLength));
+                        const end = Math.max(start, Math.min(start + matchLength, textLength));
+                        highlightRange.setStart(textNode, start);
+                        highlightRange.setEnd(textNode, end);
+                        rects = Array.from(highlightRange.getClientRects()).map((rect) => ({
+                            x: rect.left,
+                            y: rect.top,
+                            width: rect.width,
+                            height: rect.height,
+                        }));
+                    } catch {
+                        rects = undefined;
+                    }
+                }
+                setDictPopup(prev => stillCurrentLookup(prev)
+                    ? {
+                        ...prev,
+                        results: loadedResults,
+                        kanjiResults: loadedKanji,
+                        isLoading: false,
+                        systemLoading: false,
+                        highlight: { imgSrc, index, startChar: charOffset, length: matchLength, rects },
+                    }
+                    : prev);
             }
         }
     };
@@ -624,7 +685,7 @@ export const TextBox: React.FC<{
     const isMergedTarget = mergeAnchor?.imgSrc === imgSrc && mergeAnchor?.index === index;
     const isLookingUp = dictPopup.visible && dictPopup.highlight?.imgSrc === imgSrc && dictPopup.highlight?.index === index;
 
-    const classes = ['gemini-ocr-text-box', isVertical ? 'vertical' : '', isEditing ? 'editing' : '', isMergedTarget ? 'merge-target' : '', isActive ? 'mobile-active' : '', isLookingUp ? 'active-lookup' : ''].filter(Boolean).join(' ');
+    const classes = ['gemini-ocr-text-box', isVertical ? 'vertical' : '', isEditing ? 'editing' : '', isMergedTarget ? 'merge-target' : '', isActive ? 'mobile-active' : '', isLookingUp ? 'active-lookup' : '', settings.ocrBoxlessMode ? 'boxless' : ''].filter(Boolean).join(' ');
 
     const shouldBeVisible = !settings.soloHoverMode || parentVisible || isLocalHover || isEditing || isActive || isLookingUp;
     const menuPosition = contextMenu && typeof window !== 'undefined'
@@ -665,7 +726,7 @@ export const TextBox: React.FC<{
                 onBlur={() => {
                     if (settings.mobileMode) return;
                     setIsEditing(false);
-                    setIsActive(false); 
+                    setIsActive(false);
                     const raw = ref.current?.innerText || '';
                     if (raw !== displayContent) onUpdate(index, raw.replace(/\n/g, '\u200B'));
                 }}
@@ -688,25 +749,29 @@ export const TextBox: React.FC<{
                 style={{
                     left: `calc(${block.tightBoundingBox.x * 100}% - ${adj / 2}px)`,
                     top: `calc(${block.tightBoundingBox.y * 100}% - ${adj / 2}px)`,
-                    minWidth: `calc(${block.tightBoundingBox.width * 100}% + ${adj}px)`,
-                    minHeight: `calc(${block.tightBoundingBox.height * 100}% + ${adj}px)`,
-                    width: 'fit-content',
-                    height: 'fit-content',
+                    width: `calc(${block.tightBoundingBox.width * 100}% + ${adj}px)`,
+                    height: `calc(${block.tightBoundingBox.height * 100}% + ${adj}px)`,
                     fontSize: `${fontSize}px`,
-                    color: 'var(--ocr-text-color)',
+                    color: settings.ocrBoxlessMode ? 'transparent' : 'var(--ocr-text-color)',
                     whiteSpace: 'pre',
-                    overflow: isEditing ? 'auto' : 'visible', 
+                    // Keep the measured hit target unchanged while allowing a
+                    // flush edge glyph to paint its complete side bearing.
+                    overflow: isEditing ? 'auto' : 'visible',
                     touchAction: 'pan-y', 
                     
                     // Style Overrides
-                    backgroundColor: isActive ? activeBgColor : bgColor,
-                    border: `1px solid ${isActive ? theme.accent : borderColor}`,
-                    outline: isActive ? `2px solid ${theme.accent}` : 'none',
+                    backgroundColor: settings.ocrBoxlessMode ? 'transparent' : isActive ? activeBgColor : bgColor,
+                    // Borders scale with the reader transform and can cover a
+                    // whole edge of narrow vertical glyphs. The background
+                    // change alone indicates activation without obscuring art.
+                    border: 'none',
+                    outline: 'none',
+                    boxShadow: 'none',
                     borderRadius: '3px',
                     
                     lineHeight: isVertical ? '1.5' : '1.1',
                     
-                    opacity: shouldBeVisible ? 1 : 0,
+                    opacity: settings.ocrBoxlessMode || shouldBeVisible ? 1 : 0,
                     transition: 'opacity 0.2s',
                 }}
             >

@@ -2758,17 +2758,6 @@ export const AnimeVideoPlayer = ({
             }
 
             Object.entries(map).forEach(([ankiField, mapType]) => {
-                const mappedSentenceValue = mapSentenceFieldValue(
-                    mapType,
-                    sentence,
-                    sentenceFurigana,
-                    entry.headword,
-                );
-                if (mappedSentenceValue !== null) {
-                    fields[ankiField] = mappedSentenceValue;
-                    return;
-                }
-
                 if (mapType === 'Target Word') fields[ankiField] = entry.headword;
                 else if (mapType === 'Word (Again)') fields[ankiField] = entry.headword;
                 else if (mapType === 'Reading') fields[ankiField] = entry.reading;
@@ -2799,7 +2788,7 @@ export const AnimeVideoPlayer = ({
                 }
             });
 
-            const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+            const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
             const imgField = Object.keys(map).find((key) => map[key] === 'Image');
             const audioField = Object.keys(map).find((key) => map[key] === 'Sentence Audio');
 
@@ -3802,7 +3791,7 @@ export const AnimeVideoPlayer = ({
                 [entryKey]: { status: 'loading', noteId: null },
             }));
             try {
-                const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+                const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
                 const safeHeadword = entry.headword.replace(/"/g, '\\"');
                 let query = `deck:"${settings.ankiDeck}"`;
                 if (ankiTargetField) {
@@ -3975,7 +3964,7 @@ export const AnimeVideoPlayer = ({
             try {
                 const entryKey = getDictionaryEntryKey(entry);
                 const status = ankiStatusByEntry[entryKey];
-                const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+                const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
                 if (status?.noteId) {
                     await guiBrowse(url, `nid:${status.noteId}`);
                     return;
@@ -4091,7 +4080,7 @@ export const AnimeVideoPlayer = ({
                     return;
                 }
 
-                const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+                const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
                 const imageBase64 = imgField ? await captureVideoFrame() : null;
                 const audioBase64 =
                     audioField && activeContext?.audioStart != null && activeContext?.audioEnd != null

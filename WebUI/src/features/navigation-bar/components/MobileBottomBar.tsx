@@ -49,6 +49,10 @@ export const MobileBottomBar = ({ navBarItems }: { navBarItems: NavbarItem[] }) 
                 pl: 'env(safe-area-inset-left)',
                 pr: 'env(safe-area-inset-right)',
                 zIndex: theme.zIndex.drawer - 1,
+                bgcolor: '#000',
+                color: '#fff',
+                borderTop: '1px solid rgba(255,255,255,0.75)',
+                boxShadow: 'none',
             }}
             style={{
                 ...(theme.applyStyles('dark', {
@@ -65,14 +69,27 @@ export const MobileBottomBar = ({ navBarItems }: { navBarItems: NavbarItem[] }) 
                     navigate(newValue);
                 }}
                 sx={{
+                    height: 64,
+                    bgcolor: '#000',
                     px: 0.5,
                     '.MuiBottomNavigationAction-root': {
                         minWidth: 0,
                         flex: 1,
                         px: 0.5,
+                        color: 'rgba(255,255,255,0.72)',
+                        '&.Mui-selected': { color: '#fff' },
+                        '& .MuiBadge-root': {
+                            borderRadius: 999,
+                            px: 1.7,
+                            py: 0.65,
+                        },
+                        '&.Mui-selected .MuiBadge-root': {
+                            bgcolor: '#fff',
+                            color: '#000',
+                        },
                     },
                     '.MuiBottomNavigationAction-label': {
-                        fontSize: '0.7rem',
+                        fontSize: '0.68rem',
                         lineHeight: 1.1,
                         whiteSpace: 'nowrap',
                         overflow: 'hidden',
@@ -80,7 +97,8 @@ export const MobileBottomBar = ({ navBarItems }: { navBarItems: NavbarItem[] }) 
                         maxWidth: '100%',
                     },
                     '.MuiBottomNavigationAction-label.Mui-selected': {
-                        fontSize: '0.7rem',
+                        fontSize: '0.68rem',
+                        fontWeight: 700,
                     },
                 }}
             >

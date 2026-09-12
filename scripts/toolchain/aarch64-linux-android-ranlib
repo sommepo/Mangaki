@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "$(dirname "$0")/../../.toolchains/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib" "$@"

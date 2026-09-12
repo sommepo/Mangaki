@@ -184,7 +184,7 @@ export const ServerSettings = () => {
                     settingValue={serverSettings.port.toString()}
                     handleUpdate={(port) => updateSetting('port', port)}
                     value={serverSettings.port}
-                    defaultValue={4568}
+                    defaultValue={14568}
                     valueUnit={t('settings.server.address.server.label.port')}
                 />
             </List>

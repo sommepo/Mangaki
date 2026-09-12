@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+
+args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--target=x86_64-unknown-linux-gnu" ]]; then
+        continue
+    fi
+    args+=("$arg")
+done
+
+exec "$(dirname "$0")/../../.toolchains/zig/zig" c++ "${args[@]}"

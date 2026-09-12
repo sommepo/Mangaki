@@ -62,27 +62,18 @@ const ChapterInfo = ({
     return (
         <Stack>
             {/* Fix: Ghost Text for Title (Current/Next/Finished) */}
-            <Typography 
-                color={contrastText} 
-                className="yomitan-ghost-text"
-                data-text={title}
-            />
+            <Typography color={contrastText} className="yomitan-ghost-text" data-text={title} />
             {/* Fix: Ghost Text for Chapter Name */}
-            <Typography 
-                color={contrastText} 
-                variant="h6" 
+            <Typography
+                color={contrastText}
+                variant="h6"
                 component="h1"
                 className="yomitan-ghost-text"
                 data-text={name}
             />
             {scanlator && (
                 /* Fix: Ghost Text for Scanlator */
-                <Typography 
-                    variant="body2" 
-                    color={disabledText}
-                    className="yomitan-ghost-text"
-                    data-text={scanlator}
-                />
+                <Typography variant="body2" color={disabledText} className="yomitan-ghost-text" data-text={scanlator} />
             )}
         </Stack>
     );
@@ -126,6 +117,11 @@ const BaseReaderTransitionPage = ({
 
     const isFirstChapter = !!currentChapterName && !previousChapterName;
     const isLastChapter = !!currentChapterName && !nextChapterName;
+    const forkSeriesId = manga?.sourceId?.startsWith('fork:') ? manga.sourceId.slice('fork:'.length) : undefined;
+    const isForkReader = Boolean(forkSeriesId);
+    const mangaPath = forkSeriesId
+        ? `/fork/series/${encodeURIComponent(forkSeriesId)}`
+        : AppRoutes.manga.path(manga?.id ?? -1);
 
     const forceShowFirstChapterPreviousTransitionPage = isFirstChapter && type === ReaderTransitionPageMode.PREVIOUS;
     const forceShowLastChapterNextTransitionPage = isLastChapter && type === ReaderTransitionPageMode.NEXT;
@@ -166,18 +162,28 @@ const BaseReaderTransitionPage = ({
         >
             <Stack
                 sx={{
-                    gap: 2,
+                    gap: isForkReader ? 2.5 : 2,
                     maxWidth: (theme) =>
                         // spacing = added padding left + right
                         `calc(100vw - ${scrollbar.ySize}px - ${readerNavBarWidth}px - ${theme.spacing(2)})`,
                     maxHeight: `calc(100vh - ${scrollbar.xSize}px)`,
                     width: 'max-content',
                     p: 1,
+                    ...applyStyles(isForkReader, {
+                        width: { xs: 'calc(100vw - 32px)', sm: 520 },
+                        boxSizing: 'border-box',
+                        p: { xs: 2.5, sm: 3 },
+                        border: '1px solid',
+                        borderColor: 'rgba(255,255,255,0.22)',
+                        borderRadius: 3,
+                        bgcolor: 'rgba(16,16,16,0.94)',
+                        boxShadow: '0 12px 36px rgba(0,0,0,0.35)',
+                    }),
                 }}
             >
                 {isPreviousType && isFirstChapter && (
                     /* Fix: Ghost Text for "There is no previous chapter" */
-                    <Typography 
+                    <Typography
                         variant="h6"
                         className="yomitan-ghost-text"
                         data-text={t('reader.transition_page.first_chapter')}
@@ -213,7 +219,7 @@ const BaseReaderTransitionPage = ({
                 </Stack>
                 {isNextType && isLastChapter && (
                     /* Fix: Ghost Text for "Last chapter" message */
-                    <Typography 
+                    <Typography
                         variant="h6"
                         className="yomitan-ghost-text"
                         data-text={t('reader.transition_page.last_chapter')}
@@ -222,32 +228,38 @@ const BaseReaderTransitionPage = ({
                 {((isPreviousType && isFirstChapter) || (isNextType && isLastChapter)) && (
                     <Stack sx={{ flexDirection: 'row', flexWrap: 'wrap', gap: 1 }}>
                         <Button
-                            sx={{ flexGrow: 1 }}
+                            sx={{
+                                flexGrow: 1,
+                                ...applyStyles(isForkReader, { textTransform: 'none', borderRadius: 2 }),
+                            }}
                             onClick={(e) => {
                                 e.stopPropagation();
                                 handleBack();
                             }}
-                            variant="contained"
+                            variant={isForkReader ? 'outlined' : 'contained'}
                         >
                             {/* Fix: Ghost Text inside Button (use span) */}
-                            <span 
-                                className="yomitan-ghost-text" 
-                                data-text={t('reader.transition_page.exit.previous_page')} 
+                            <span
+                                className="yomitan-ghost-text"
+                                data-text={t('reader.transition_page.exit.previous_page')}
                             />
                         </Button>
                         <Button
-                            sx={{ flexGrow: 1 }}
+                            sx={{
+                                flexGrow: 1,
+                                ...applyStyles(isForkReader, { textTransform: 'none', borderRadius: 2 }),
+                            }}
                             component={Link}
                             onClick={(e) => {
                                 e.stopPropagation();
                             }}
-                            variant="contained"
-                            to={AppRoutes.manga.path(manga?.id ?? -1)}
+                            variant={isForkReader ? 'outlined' : 'contained'}
+                            to={mangaPath}
                         >
                             {/* Fix: Ghost Text inside Button (use span) */}
-                            <span 
-                                className="yomitan-ghost-text" 
-                                data-text={t('reader.transition_page.exit.manga_page')} 
+                            <span
+                                className="yomitan-ghost-text"
+                                data-text={t('reader.transition_page.exit.manga_page')}
                             />
                         </Button>
                     </Stack>

@@ -32,6 +32,7 @@ export const useReaderSetChaptersState = (
     shouldSkipDupChapters: IReaderSettings['shouldSkipDupChapters'],
     shouldSkipFilteredChapters: IReaderSettings['shouldSkipFilteredChapters'],
     chapterListOptions: ChapterListOptions,
+    initialChapterId?: number,
 ) => {
     const navigate = useNavigate();
     const locationState = useLocation<ReaderOpenChapterLocationState>().state;
@@ -42,7 +43,9 @@ export const useReaderSetChaptersState = (
     useEffect(() => {
         const newMangaChapters = chaptersResponse.data?.chapters.nodes;
         const newCurrentChapter = newMangaChapters
-            ? (newMangaChapters[newMangaChapters.length - chapterSourceOrder] ?? null)
+            ? (newMangaChapters.find((chapter) => chapter.id === initialChapterId) ??
+              newMangaChapters[newMangaChapters.length - chapterSourceOrder] ??
+              null)
             : undefined;
         const newInitialChapter = finalInitialChapter ?? newCurrentChapter;
         const newChapterForDuplicatesHandling = chapterForDuplicatesHandling ?? newCurrentChapter;
@@ -117,5 +120,6 @@ export const useReaderSetChaptersState = (
         shouldSkipFilteredChapters,
         finalInitialChapter,
         chapterListOptions,
+        initialChapterId,
     ]);
 };

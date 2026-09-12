@@ -1,161 +1,62 @@
-# Manatan
-<div align="center">
+# Mangaki
 
-[![Github All Releases](https://img.shields.io/github/downloads/kolbyml/manatan/total.svg)](https://github.com/kolbyml/manatan/releases)
-[![GitHub Sponsors](https://img.shields.io/github/sponsors/kolbyml)](https://github.com/sponsors/kolbyml)
-[![Static Badge](https://img.shields.io/badge/donate-support-ed6760?label=donate)](https://manatan.com/support)
-[![GitHub License](https://img.shields.io/github/license/kolbyml/manatan)](https://github.com/kolbyml/manatan?tab=MIT-1-ov-file)
-[![Discord](https://img.shields.io/discord/1448140648950530182?color=%237785cc)](https://discord.gg/tDAtpPN8KK)
+Mangaki is an Android manga reader for Japanese immersion, derived from the public [Manatan](https://github.com/KolbyML/Manatan) source. It keeps Manatan's reader, zoom, OCR-overlay, dictionary lookup, and mining interaction while providing a manga-focused library and a compact, high-contrast interface.
 
-</div>
+This is an independent community fork. It is not an official Manatan release and is not affiliated with the Manatan maintainers.
 
-**The easiest way to watch anime or read manga, light novels, and EPUBs with instant OCR/subtitle lookup.** *No scripts, no complex setup—just download and go.*
+## Current features
 
-Website: https://manatan.com  
-Discord Server: https://discord.gg/tDAtpPN8KK
+- Local Android folders and CBZ/ZIP archives through the Storage Access Framework
+- SMB, WebDAV, and Komga sources
+- Two-column manga and volume libraries with progress and read state
+- Continuous vertical and left-to-right/right-to-left readers
+- Manatan-compatible pinch zoom, pan, tap zones, page scrubber, and resume position
+- On-device Japanese OCR plus an optional self-hosted OCR endpoint
+- Tap-to-lookup dictionaries with term and frequency dictionary import
+- AnkiDroid and AnkiConnect mining with configurable field mappings
+- Bulk OCR/offline operations, categories, hidden-content controls, and background jobs
+- Reading sessions grouped by manga with individual and bulk removal
+- Credential-free settings backup and restore
 
-## Screenshots
+See [the user guide](docs/USER_GUIDE.md), [implementation checklist](docs/IMPLEMENTATION_CHECKLIST.md), [acceptance report](docs/ACCEPTANCE_REPORT.md), and [remaining roadmap](docs/ROADMAP.md) for the exact tested boundaries.
 
-<p align="center">
-  <img src="docs/assets/screenshots/manga-library.png" width="240" alt="Manatan manga library on mobile">
-  <img src="docs/assets/screenshots/manga-reader-dictionary.png" width="240" alt="Manatan manga reader dictionary lookup on mobile">
-  <img src="docs/assets/screenshots/video-dictionary-overlay.png" width="420" alt="Manatan video dictionary lookup overlay">
-</p>
+## Android build
 
-## ✨ Why Manatan?
-
-Traditional setups for watching anime or reading manga with Japanese lookup can be complicated, often requiring users to install Python scripts, browser extensions (like userscripts), and configure local servers manually.
-
-**Manatan simplifies everything into a single app:**
-* **Zero Configuration:** No need to install "Monkey scripts," configure Optical Character Recognition (OCR) tools, or mess with command lines.
-* **Universal Language Support:** Manatan supports every language.
-* **Built-in OCR for Manga:** Just hover over text to get selectable text for dictionary lookups.
-* **Anime Support:** Subtitle parsing with popup dictionary lookups while you watch.
-* **1-Click Anime Cards:** Generate Anki cards from anime sentences with a single click, with sentence audio.
-* **Novel Support:** Read EPUBs with sync across devices, instant dictionary lookups, and Anki card generation.
-* **Sync:** Keep your media progress and learning data synced across devices.
-* **Manga File Support:** Read local manga from folders, CBZ/ZIP, EPUB, and modern image formats like JPEG XL.
-* **Cross-Platform:** Run the exact same interface on your PC, Mac, Android, or iOS device.
-* **Extensible:** Supports Mihon, Aniyomi, and Aidoku extensions
-
-### 🖥️ Supported Platforms
-| Windows | Linux | macOS | Android | iOS |
-| :---: | :---: | :---: | :---: | :---: |
-| ✅ | ✅ | ✅ | ✅ | ✅ |
-
-> **📱 iOS Users:** The iOS app is currently in **Public Beta**. Please join our [Discord Server](https://discord.gg/tDAtpPN8KK) to find the TestFlight invite link.
-
-## 🚀 Getting Started
-
-Download the latest release for your platform from the [Releases](https://github.com/KolbyML/Manatan/releases) page.
-
-### Linux Flatpak
-
-Flatpak website: https://kolbyml.github.io/Manatan/
-
-Install the signed official Flatpak repository and Manatan with one command:
+The supported local release command is:
 
 ```sh
-flatpak install --user https://kolbyml.github.io/Manatan/io.github.kolbyml.Manatan.flatpakref
+scripts/create-signing-key.sh # first build only; back up .secrets privately
+scripts/build-android.sh
 ```
 
-The repository is added automatically, so future releases arrive through your
-software center or the normal update command:
+The signed APK is written to:
 
-```sh
-flatpak update --user io.github.kolbyml.Manatan
+```text
+android-app/app/build/outputs/apk/release/app-release.apk
 ```
 
-Run the executable, then visit `http://127.0.0.1:4567/` in your web browser to access the Manatan web interface.
+Local Android SDK/NDK/Rust/Gradle tooling can be bootstrapped with the scripts in `scripts/`. Generated toolchains, signing keys, WebUI bundles, device evidence, and APKs are intentionally ignored by Git.
 
-For Nix and NixOS, a [Flake](https://github.com/GKHWB/Manatan-Flake) is available.
+The Android application ID is `dev.local.mangareader`, allowing it to be installed beside stock Manatan. `scripts/install-android.sh` refuses to install an APK with any other application ID.
 
-## Roadmap
+Proven validation commands are documented in [AGENTS.md](AGENTS.md).
 
-- [x] Package Manatan, OCR server, and source runtime into a single app.
-- [x] Add Windows, Linux, macOS, Android, and iOS support.
-- [x] Add anime/video playback and subtitle lookup.
-- [x] Add manga reading and OCR lookup.
-- [x] Add one-click anime/video cards.
-- [x] Add novel and EPUB reading.
-- [x] Add novel sync support across devices.
-- [x] Add word audio.
-- [x] Add Mihon/Tachiyomi, Aniyomi, and Aidoku extension support.
-- [x] Add local `.mkv` video support.
-- [x] Add local manga archive and EPUB support.
-- [x] Add native Android runtime without bundled JVM assets.
-- [x] Add Sync support for Video, Manga, Novels, and more.
-- [x] Add EPUB support for Manga
-- [x] Fully Rewrite the Novel Reader
-- [x] Add MPV-based video player for Android & iOS (All Video Codecs are supported)
-- [x] Add local OCR engine support for Android, iOS, and Desktop.
-- [x] Add one-click local audio setup for popup dictionary lookups.
-- [ ] Port Mihon's Manga Reader to Manatan Android
-- [ ] Port Mihon's Manga Reader to Manatan iOS
-- [ ] Add Browser & Youtube Mining Support
-- [ ] Continue improving local media setup and scanning UX.
-- [ ] Add Mangayomi and LNReader extension support.
-- [ ] Add manga immersion stats.
-- [ ] Suggest more features on [GitHub Issues](https://github.com/KolbyML/Manatan/issues/new).
+## Optional OCR service
 
-## Setup
+The self-hosted service is intended for a private HTTPS or Tailscale connection and is not required for the offline ML Kit mode. Installation instructions are in [services/mangaki-ocr/README.md](services/mangaki-ocr/README.md).
 
-1.  Download the latest release for your platform from the [releases](https://github.com/KolbyML/Manatan/releases) page.
-    * **Windows:** Download the `.zip` file for `windows-x86`, extract it, then launch `manatan.exe`.
-      * *Note: If prompted by Windows Defender SmartScreen, click **More info** > **Run anyway**. If it doesn't run on double-click, right-click the file > **Properties** > **Unblock**.*
-    * **macOS:** Download the macOS build, unzip it, then open `Manatan.app`.
-      * *If macOS blocks the app because it is unsigned, go to **System Settings** > **Privacy & Security** and click **Open Anyway** for Manatan, then reopen the app.*
-2.  A "Manatan Launcher" window will appear. Click "**Open Web UI**".
-3.  **Windows:** Allow Windows Firewall connections if prompted.
-4.  The Manatan web interface (`127.0.0.1:4567/`) should open in a new browser tab.
-    * *Please wait ~30 seconds for the initial setup to finish. Reload the page to access the library.*
-5.  **Adding Sources:**
-    * Google how to use Mihon, then if you want to try other extension support google how to use Aniyomi or Aidoku.
-6.  **Installing Extensions:**
-    * Go to **"Browse"** on the left sidebar, then the **"Extensions"** tab.
-    * Click **"Install"** on your desired source.
-7.  **Start Watching or Reading:**
-    * Go to the **"Sources"** tab, click your installed source, and find an anime or manga.
-    * **OCR and subtitle lookup are automatically active!** You can use tools like Yomitan immediately.
-* For Yomitan Users:
-   * To ensure sentences are parsed correctly for Anki cards, go to Text parsing in Yomitan's settings (enable Advanced), and set Sentence Termination to "Custom, No New Lines". This prevents OCR line breaks from being treated as sentence endings.
-   * Disabling ellipsis `…` as a sentence terminator is also recommended.
+Reader pages are sent to that endpoint only when the user explicitly selects the self-hosted provider. The included service does not intentionally persist submitted images or recognised text.
 
-## Local Manga
-You can also read manga files stored locally on your device. To set up local manga:  
-1. Set your local manga directory in Settings → Browse → "Local source location"
-2. Use one of these paths depending on your platform:
-* Android Internal Storage: Use paths like `/storage/emulated/0/YourFolder/`
-* Android SD Cards: Use `/storage/[SD_CARD_ID]/YourFolder/` where [SD_CARD_ID] is the unique identifier Android assigned to your SD card (you can find this using file manager apps like X-plore)
-* Windows: The default local manga directory is at C:\Users\[YourUsername]\AppData\Local\Tachidesk\local)
-3. You will then be able to find your local manga under **Browse → Sources → Local source**
-### Important : Your manga must follow a specific folder structure to be detected properly.
-Refer to the [Manatan local manga guide](https://manatan.com/docs/guides/local-manga) for details on how to structure your folders.
+## Source and binary boundary
 
-## Local Anime
-You can also watch anime files stored locally on your device. To set up local anime:
-1. Set your local anime directory in Settings -> Browse -> "Local anime source location"
-2. Place your files in the expected folder structure for detection
+Mangaki retains the published `Manatan-Server-Public` Android static library as an embedded, local compatibility dependency. Its wrapper is public, but the downloaded static archive is built from private backend source and is therefore opaque and not source-reproducible from this repository. It is not an external cloud service.
 
-Refer to the [Manatan local anime guide](https://manatan.com/docs/guides/local-anime) for details on folder layout and naming.
+The fork adds or replaces individual manga-only interfaces where needed; it does not claim to reimplement the complete backend. See [the upstream audit](docs/UPSTREAM_AUDIT.md) for the component and ownership map.
 
-## Troubleshooting
+No signing keys, credentials, personal manga, private dictionaries, production Anki data, or prebuilt APK are committed to this repository.
 
-To fully clear cache and data from previous installs, delete the following folders and try again:
+## Licensing and attribution
 
-* `manatan-windows-x86` (Your extraction folder)
-* `%LOCALAPPDATA%\Tachidesk`
-* `%APPDATA%\manatan`
-* `%Temp%\Suwayomi*`
-* `%Temp%\Tachidesk*`
-* **Browser Data:** Clear Site data & cookies for `127.0.0.1`
+The repository retains Manatan's upstream history and copyright notices. Root components are distributed under the [MIT License](LICENSE); the WebUI and covered modifications retain the [Mozilla Public License 2.0](WebUI/LICENSE). Third-party dependencies remain under their respective licenses.
 
-## 📚 References and acknowledgements
-The following links, repos, companies and projects have been important in the development of this repo, we have learned a lot from them and want to thank and acknowledge them.
-- https://github.com/Suwayomi/Suwayomi-Server
-- https://github.com/Suwayomi/Suwayomi-WebUI
-- https://github.com/Manhhao/hoshidicts/tree/main-mit
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=KolbyML/Manatan&type=date&legend=top-left)](https://www.star-history.com/#KolbyML/Manatan&type=date&legend=top-left)
+Hoshi Reader was used only as a visual reference. Its GPL-3.0 source was not copied into this derivative.

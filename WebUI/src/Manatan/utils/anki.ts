@@ -2,6 +2,7 @@
  * Updated AnkiConnect API call with automatic permission handshake
  */
 import { getDownscaledSize } from './image';
+import { ForkApi } from '@/features/fork/ForkApi';
 
 const ANKI_LOG_COOLDOWN_MS = 60000;
 let lastAnkiLogAt = 0;
@@ -41,8 +42,11 @@ async function ankiConnect(
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
         try {
+            const isOnDeviceBridge = /^http:\/\/(127\.0\.0\.1|localhost):18765\/?$/i.test(url);
+            const token = isOnDeviceBridge ? (window as any).MangaReaderNative?.getAnkiBridgeToken?.() : undefined;
             const res = await fetch(url, {
                 method: "POST",
+                headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Manga-Reader-Bridge': token } : {}) },
                 body: JSON.stringify(body),
                 signal: controller.signal,
             });
@@ -128,6 +132,18 @@ export async function findNotes(url: string, query: string): Promise<number[]> {
  */
 export async function notesInfo(url: string, notes: number[]): Promise<any[]> {
     return await ankiConnect("notesInfo", { notes }, url);
+}
+
+/** Ask Anki whether notes can be added without creating duplicates. */
+export async function canAddNotes(
+    url: string,
+    notes: Array<{
+        deckName: string;
+        modelName: string;
+        fields: Record<string, string>;
+    }>,
+): Promise<boolean[]> {
+    return await ankiConnect("canAddNotes", { notes }, url);
 }
 
 /**
@@ -242,6 +258,7 @@ export async function addNote(
     options?: {
         allowDuplicate?: boolean;
         duplicateScope?: string;
+        recordMiningEvent?: boolean;
     }
 ) {
     const params: any = {
@@ -265,7 +282,11 @@ export async function addNote(
         params.note.audio = Array.isArray(audio) ? audio : [audio];
     }
 
-    return await ankiConnect("addNote", params, url);
+    const result = await ankiConnect("addNote", params, url);
+    if (result !== null && result !== undefined && result !== false && options?.recordMiningEvent !== false) {
+        ForkApi.recordEvent('card_mined', { uniqueKey: String(result) }).catch(() => undefined);
+    }
+    return result;
 }
 
 /**

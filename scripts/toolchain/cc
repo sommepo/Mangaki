@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+args=()
+for arg in "$@"; do
+    # cc-rs emits Rust's host triple, which Zig spells x86_64-linux-gnu.
+    if [[ "$arg" == "--target=x86_64-unknown-linux-gnu" ]]; then
+        continue
+    fi
+    args+=("$arg")
+done
+
+exec "$(dirname "$0")/../../.toolchains/zig/zig" cc "${args[@]}"

@@ -30,6 +30,13 @@ pub struct OcrRequest {
     pub context: String,
     pub add_space_on_merge: Option<bool>,
     pub language: Option<OcrLanguage>,
+    pub provider: Option<String>,
+    #[serde(default, rename = "remote_url", alias = "remoteUrl")]
+    pub remote_url: Option<String>,
+    #[serde(default)]
+    pub refresh: bool,
+    #[serde(default)]
+    pub cache_only: bool,
 }
 
 fn default_context() -> String {
@@ -54,12 +61,51 @@ pub async fn ocr_handler(
     Query(params): Query<OcrRequest>,
 ) -> Result<Json<Vec<crate::logic::OcrResult>>, (StatusCode, String)> {
     let language = params.language.unwrap_or_default();
-    let cache_key = logic::get_cache_key(&params.url, Some(language));
+    let use_network_provider = matches!(params.provider.as_deref(), Some("lens"));
+    let use_self_hosted_provider = matches!(params.provider.as_deref(), Some("self_hosted"));
+    if !matches!(params.provider.as_deref(), None | Some("on_device" | "lens" | "self_hosted")) {
+        return Err((StatusCode::BAD_REQUEST, "Unknown OCR provider".to_string()));
+    }
+    let self_hosted_url = if use_self_hosted_provider {
+        let value = params.remote_url.as_deref().ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Self-hosted OCR URL is required".to_string())
+        })?;
+        logic::validate_self_hosted_ocr_url(value)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+        Some(value.trim().trim_end_matches('/').to_string())
+    } else {
+        None
+    };
+    let provider_revision = if use_network_provider {
+        Some("lens-network-v1")
+    } else if use_self_hosted_provider {
+        Some("self-hosted-owoocr-v2-line-0.45")
+    } else if cfg!(target_os = "android") {
+        Some("mlkit-ja-16.0.1-merged-v3")
+    } else {
+        None
+    };
+    let provider_cache_url = provider_revision
+        .and_then(|revision| {
+            let mut url = reqwest::Url::parse(&params.url).ok()?;
+            url.query_pairs_mut().append_pair("ocrProviderRevision", revision);
+            if let Some(remote_url) = self_hosted_url.as_deref() {
+                url.query_pairs_mut().append_pair("ocrRemote", remote_url);
+            }
+            Some(url.to_string())
+        })
+        .unwrap_or_else(|| params.url.clone());
+    let cache_key = logic::get_cache_key(&provider_cache_url, Some(language));
     let chapter_key = params
         .base_url
         .as_ref()
         .map(|base| logic::get_cache_key(base, Some(language)));
     info!("OCR Handler: Incoming request for cache_key={}", cache_key);
+
+    if params.refresh {
+        state.delete_cache_entry(&cache_key);
+        info!("OCR Handler: Forced fresh recognition for cache_key={}", cache_key);
+    }
 
     info!("OCR Handler: Checking cache...");
     if let Some(entry) = state.get_cache_entry(&cache_key) {
@@ -73,7 +119,9 @@ pub async fn ocr_handler(
 
     // Back-compat: older versions included sourceId in the cache key.
     // Try to find a matching entry and promote it to the normalized key.
-    if let Some((_legacy_key, legacy_entry)) = state.get_cache_entry_sourceid_variant(&cache_key) {
+    if !params.refresh
+        && let Some((_legacy_key, legacy_entry)) = state.get_cache_entry_sourceid_variant(&cache_key)
+    {
         info!(
             "OCR Handler: Cache HIT via sourceId variant for cache_key={}",
             cache_key
@@ -85,17 +133,22 @@ pub async fn ocr_handler(
         state.requests_processed.fetch_add(1, Ordering::Relaxed);
         return Ok(Json(legacy_entry.data));
     }
+    if params.cache_only {
+        return Err((StatusCode::NOT_FOUND, "OCR cache entry not found".to_string()));
+    }
     info!(
         "OCR Handler: Cache MISS for cache_key={}. Starting processing.",
         cache_key
     );
 
-    let result = logic::fetch_and_process(
+    let result = logic::fetch_and_process_with_provider(
         &params.url,
         params.user.clone(),
         params.pass.clone(),
         params.add_space_on_merge,
         language,
+        use_network_provider,
+        self_hosted_url,
     )
     .await;
 

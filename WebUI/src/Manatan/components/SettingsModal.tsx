@@ -1,19 +1,22 @@
 import React, { useCallback, useMemo, useState, useRef, useEffect } from 'react';
-import Stack from '@mui/material/Stack';
 import IconButton from '@mui/material/IconButton';
-import Typography from '@mui/material/Typography';
-import AddIcon from '@mui/icons-material/Add';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
-import { bindTrigger, usePopupState } from 'material-ui-popup-state/hooks';
 import { useOCR } from '@/Manatan/context/OCRContext';
 import { COLOR_THEMES, DEFAULT_SETTINGS } from '@/Manatan/types';
-import { apiRequest, getAppVersion, checkForUpdates, triggerAppUpdate, installAppUpdate, getFrequencyDictionaries, getDictionaries } from '@/Manatan/utils/api';
+import { apiRequest, getFrequencyDictionaries, getDictionaries } from '@/Manatan/utils/api';
 import { DictionaryManager } from './DictionaryManager';
-import { getAnkiVersion, getDeckNames, getModelNames, getModelFields, logAnkiError } from '@/Manatan/utils/anki';
+import {
+    addNote,
+    canAddNotes,
+    getAnkiVersion,
+    getDeckNames,
+    findNotes,
+    getModelNames,
+    getModelFields,
+    logAnkiError,
+    notesInfo,
+} from '@/Manatan/utils/anki';
 import { ResetButton } from '@/base/components/buttons/ResetButton.tsx';
-import { Hotkey } from '@/features/reader/hotkeys/settings/components/Hotkey.tsx';
-import { RecordHotkey } from '@/features/reader/hotkeys/settings/components/RecordHotkey.tsx';
-import { AnimeHotkey, ANIME_HOTKEYS, ANIME_HOTKEY_LABELS, DEFAULT_ANIME_HOTKEYS } from '@/Manatan/hotkeys/AnimeHotkeys.ts';
 
 const checkboxLabelStyle: React.CSSProperties = {
     display: 'flex', alignItems: 'center', marginBottom: '8px', cursor: 'pointer', textAlign: 'left', 
@@ -41,13 +44,6 @@ const statusDotStyle = (connected: boolean): React.CSSProperties => ({
     boxShadow: connected ? '0 0 5px #2ecc71' : 'none'
 });
 
-const hotkeyRowStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    flexWrap: 'wrap',
-};
-
 const inlineInputWrapperStyle: React.CSSProperties = {
     position: 'relative',
     display: 'flex',
@@ -70,54 +66,6 @@ const inlineInputStyle: React.CSSProperties = {
 
 const inlineInputCompactStyle: React.CSSProperties = {
     paddingRight: '42px',
-};
-
-const unitToggleStyle = (active: boolean): React.CSSProperties => ({
-    padding: '2px 6px',
-    borderRadius: '4px',
-    border: '1px solid #444',
-    background: active ? '#444' : '#222',
-    color: '#fff',
-    fontSize: '0.75em',
-    cursor: 'pointer',
-});
-
-const AnimeHotkeyRow = ({
-    hotkey,
-    keys,
-    existingKeys,
-    onChange,
-}: {
-    hotkey: AnimeHotkey;
-    keys: string[];
-    existingKeys: string[];
-    onChange: (keys: string[]) => void;
-}) => {
-    const popupState = usePopupState({ popupId: `manatan-record-hotkey-${hotkey}`, variant: 'dialog' });
-
-    return (
-        <div style={hotkeyRowStyle}>
-            <Typography variant="body2" sx={{ minWidth: 200, flexGrow: 1 }}>
-                {ANIME_HOTKEY_LABELS[hotkey]}
-            </Typography>
-            <Hotkey
-                keys={keys}
-                removeKey={(keyToRemove) => onChange(keys.filter((key) => key !== keyToRemove))}
-            />
-            <IconButton {...bindTrigger(popupState)} size="small" color="inherit" aria-label="Add hotkey">
-                <AddIcon fontSize="small" />
-            </IconButton>
-            <ResetButton asIconButton onClick={() => onChange(DEFAULT_ANIME_HOTKEYS[hotkey])} />
-            {popupState.isOpen && (
-                <RecordHotkey
-                    onClose={popupState.close}
-                    onCreate={(recordedKeys) => onChange([...keys, ...recordedKeys])}
-                    existingKeys={existingKeys}
-                    disablePortal
-                />
-            )}
-        </div>
-    );
 };
 
 const BASE_MAPPING_OPTIONS = [
@@ -169,29 +117,39 @@ const DOWNSCALE_OPTIONS = [
     { value: '2560', label: '2560' },
     { value: '3840', label: '3840' },
 ];
+
+const ACCEPTANCE_TEST_TAG = 'codex_manga_reader_acceptance_20260908';
+const ACCEPTANCE_TEST_MARKER = 'MangaReaderSyntheticAcceptance20260908';
+const ACCEPTANCE_TEST_IMAGE_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR42mP8z8DAwMDAxAADCBYAOxgCAfFzB9sAAAAASUVORK5CYII=';
+
+const syntheticValueForMapping = (mapping: string | undefined): string => {
+    switch (mapping) {
+        case 'Target Word': return '合成試験';
+        case 'Word (Again)': return '合成試験';
+        case 'Reading': return 'ごうせいしけん';
+        case 'Furigana': return '合成[ごうせい] 試験[しけん]';
+        case 'Sentence': return 'これは合成された受け入れ試験です。';
+        case 'Sentence Furigana': return 'これは 合成[ごうせい] された 受[う]け 入[い]れ 試験[しけん] です。';
+        case 'Glossary':
+        case 'Definition': return 'Synthetic Mangaki acceptance test; no manga content.';
+        case 'Frequency':
+        case 'Harmonic Frequency': return '999999';
+        case 'Pitch Accent': return 'synthetic';
+        case 'Pitch Accent Positions': return '0';
+        case 'Pitch Accent Categories': return 'synthetic';
+        case 'x': return 'x';
+        default: return '';
+    }
+};
+
 export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-    const { settings, setSettings, showConfirm, showAlert, showProgress, closeDialog, showDialog, openSetup } = useOCR();
+    const { settings, setSettings, showConfirm, showAlert, showProgress, closeDialog, showDialog } = useOCR();
     const [localSettings, setLocalSettings] = useState(settings);
     const [showAdvancedAnki, setShowAdvancedAnki] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [dictManagerKey, setDictManagerKey] = useState(0);
     const [dictionaryNames, setDictionaryNames] = useState<string[]>([]);
-    const popupWidthUnit = localSettings.animePopupWidthUnit ?? 'percent';
-    const popupHeightUnit = localSettings.animePopupHeightUnit ?? 'percent';
-    const popupTopUnit = localSettings.animePopupTopOffsetUnit ?? 'percent';
-    const popupLeftUnit = localSettings.animePopupLeftOffsetUnit ?? 'percent';
-    const popupWidthValue = popupWidthUnit === 'px'
-        ? localSettings.animePopupWidthPx
-        : localSettings.animePopupWidthPercent;
-    const popupHeightValue = popupHeightUnit === 'px'
-        ? localSettings.animePopupHeightPx
-        : localSettings.animePopupHeightPercent;
-    const popupTopValue = popupTopUnit === 'px'
-        ? localSettings.animePopupTopOffsetPx
-        : localSettings.animePopupTopOffsetPercent;
-    const popupLeftValue = popupLeftUnit === 'px'
-        ? localSettings.animePopupLeftOffsetPx
-        : localSettings.animePopupLeftOffsetPercent;
     const yomitanPopupWidthValue = Number.isFinite(localSettings.yomitanPopupWidthPx)
         ? localSettings.yomitanPopupWidthPx
         : DEFAULT_SETTINGS.yomitanPopupWidthPx;
@@ -202,18 +160,9 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
         ? localSettings.yomitanPopupScalePercent
         : DEFAULT_SETTINGS.yomitanPopupScalePercent;
     const yomitanPopupThemeValue = localSettings.yomitanPopupTheme || 'dark';
-    const animePopupThemeValue = localSettings.animePopupTheme || 'dark';
     const persistSettings = useCallback((nextSettings: typeof settings) => {
         setSettings(nextSettings);
     }, [setSettings]);
-    const animeHotkeys = useMemo(
-        () => ({
-            ...DEFAULT_ANIME_HOTKEYS,
-            ...(localSettings.animeHotkeys ?? {}),
-        }),
-        [localSettings.animeHotkeys],
-    );
-    const existingAnimeHotkeys = useMemo(() => Object.values(animeHotkeys).flat(), [animeHotkeys]);
 
     useEffect(() => {
         let cancelled = false;
@@ -268,31 +217,11 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     }, [dictionaryNames, localSettings.ankiFieldMap]);
     const [availableFreqDicts, setAvailableFreqDicts] = useState<string[]>([]);
 
-    const updateAnimeHotkey = useCallback((hotkey: AnimeHotkey, keys: string[]) => {
-        setLocalSettings((prev) => {
-            const next = {
-                ...prev,
-                animeHotkeys: {
-                    ...DEFAULT_ANIME_HOTKEYS,
-                    ...(prev.animeHotkeys ?? {}),
-                    [hotkey]: keys,
-                },
-            };
-            persistSettings(next);
-            return next;
-        });
-    }, [persistSettings]);
-
     // --- ANKI STATE ---
     const [ankiStatus, setAnkiStatus] = useState<'idle' | 'loading' | 'connected' | 'error'>('idle');
     const [ankiDecks, setAnkiDecks] = useState<string[]>([]);
     const [ankiModels, setAnkiModels] = useState<string[]>([]);
     const [currentModelFields, setCurrentModelFields] = useState<string[]>([]);
-
-    // --- UPDATE STATE ---
-    const [appVersion, setAppVersion] = useState<string>('...');
-    const [updateAvailable, setUpdateAvailable] = useState<any>(null);
-    const [updateStatus, setUpdateStatus] = useState<string>('idle');
 
     useEffect(() => {
         const fetchFreqDicts = async () => {
@@ -305,7 +234,7 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     const fetchAnkiData = async () => {
         if (!localSettings.ankiConnectEnabled) return;
         
-        const url = localSettings.ankiConnectUrl || 'http://127.0.0.1:8765';
+        const url = localSettings.ankiConnectUrl || 'http://127.0.0.1:18765';
         setAnkiStatus('loading');
         
         const status = await getAnkiVersion(url);
@@ -335,7 +264,7 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     // Fetch fields when model changes or when connection is established with a pre-selected model
     useEffect(() => {
         const fetchFields = async () => {
-             const url = localSettings.ankiConnectUrl || 'http://127.0.0.1:8765';
+             const url = localSettings.ankiConnectUrl || 'http://127.0.0.1:18765';
              if (ankiStatus === 'connected' && localSettings.ankiModel) {
                  try {
                      const f = await getModelFields(url, localSettings.ankiModel);
@@ -349,65 +278,6 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     }, [localSettings.ankiModel, ankiStatus]);
 
 
-    // --- POLL STATUS ---
-    useEffect(() => {
-        let isMounted = true;
-
-        const checkStatus = async () => {
-            try {
-                const info = await getAppVersion();
-                if (!isMounted) return;
-
-                if (info.version !== '0.0.0') {
-                    setAppVersion(`${info.version} (${info.variant})`);
-                }
-
-                if (info.update_status && info.update_status !== 'idle') {
-                    setUpdateStatus(info.update_status);
-                } 
-                else if (info.variant !== 'unknown' && info.variant !== 'desktop' && info.variant !== 'ios') {
-                    if (!updateAvailable) {
-                        const update = await checkForUpdates(info.version, info.variant);
-                        if (isMounted && update.hasUpdate) setUpdateAvailable(update);
-                    }
-                    if (updateStatus !== 'downloading' && updateStatus !== 'ready') {
-                        setUpdateStatus('idle');
-                    }
-                }
-            } catch (e) { console.error(e); }
-        };
-
-        checkStatus();
-        const interval = setInterval(checkStatus, 2000); 
-        return () => { isMounted = false; clearInterval(interval); };
-    }, [updateStatus, updateAvailable]); 
-
-    // --- ACTIONS ---
-
-    const handleDownload = () => {
-        if (!updateAvailable) return;
-        showDialog({
-            type: 'confirm',
-            title: 'Download Update',
-            message: 'Version ' + updateAvailable.version + ' will download in the background.',
-            // @ts-ignore
-            confirmText: 'Start',
-            cancelText: 'Cancel',
-            onConfirm: async () => {
-                await triggerAppUpdate(updateAvailable.url, updateAvailable.name);
-                setUpdateStatus('downloading'); 
-            }
-        });
-    };
-
-    const handleInstall = async () => {
-        try {
-            await installAppUpdate();
-        } catch (e) {
-            showAlert('Error', 'Failed to launch installer.');
-        }
-    };
-
     // --- SETTINGS LOGIC ---
     const handleChange = (key: keyof typeof settings | string, value: any) => {
         setLocalSettings((prev) => {
@@ -415,30 +285,6 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
             persistSettings(next);
             return next;
         });
-    };
-
-    const resetPopupWidth = () => {
-        handleChange('animePopupWidthUnit', DEFAULT_SETTINGS.animePopupWidthUnit);
-        handleChange('animePopupWidthPercent', DEFAULT_SETTINGS.animePopupWidthPercent);
-        handleChange('animePopupWidthPx', DEFAULT_SETTINGS.animePopupWidthPx);
-    };
-
-    const resetPopupHeight = () => {
-        handleChange('animePopupHeightUnit', DEFAULT_SETTINGS.animePopupHeightUnit);
-        handleChange('animePopupHeightPercent', DEFAULT_SETTINGS.animePopupHeightPercent);
-        handleChange('animePopupHeightPx', DEFAULT_SETTINGS.animePopupHeightPx);
-    };
-
-    const resetPopupTop = () => {
-        handleChange('animePopupTopOffsetUnit', DEFAULT_SETTINGS.animePopupTopOffsetUnit);
-        handleChange('animePopupTopOffsetPercent', DEFAULT_SETTINGS.animePopupTopOffsetPercent);
-        handleChange('animePopupTopOffsetPx', DEFAULT_SETTINGS.animePopupTopOffsetPx);
-    };
-
-    const resetPopupLeft = () => {
-        handleChange('animePopupLeftOffsetUnit', DEFAULT_SETTINGS.animePopupLeftOffsetUnit);
-        handleChange('animePopupLeftOffsetPercent', DEFAULT_SETTINGS.animePopupLeftOffsetPercent);
-        handleChange('animePopupLeftOffsetPx', DEFAULT_SETTINGS.animePopupLeftOffsetPx);
     };
 
     const resetYomitanPopupWidth = () => {
@@ -455,10 +301,6 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
 
     const resetYomitanPopupCustomCss = () => {
         handleChange('yomitanPopupCustomCss', DEFAULT_SETTINGS.yomitanPopupCustomCss);
-    };
-
-    const resetAnimePopupCustomCss = () => {
-        handleChange('animePopupCustomCss', DEFAULT_SETTINGS.animePopupCustomCss);
     };
 
     const handleFieldMapChange = (ankiField: string, mapValue: string) => {
@@ -513,6 +355,132 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     // Helper to find the field currently mapped to a specific content type
     const getFieldForContent = (contentType: string) => {
         return Object.keys(localSettings.ankiFieldMap || {}).find(key => localSettings.ankiFieldMap?.[key] === contentType) || '';
+    };
+
+    const runSyntheticAnkiTest = async () => {
+        const deckName = localSettings.ankiDeck;
+        const modelName = localSettings.ankiModel;
+        if (!deckName || !modelName || currentModelFields.length === 0) {
+            showAlert('Anki test unavailable', 'Select a target deck and card type, then retry the connection.');
+            return;
+        }
+
+        const fieldMap = localSettings.ankiFieldMap || {};
+        const fields: Record<string, string> = {};
+        for (const field of currentModelFields) {
+            fields[field] = syntheticValueForMapping(fieldMap[field]);
+        }
+        const firstField = currentModelFields[0];
+        fields[firstField] = fields[firstField]
+            ? `${ACCEPTANCE_TEST_MARKER} ${fields[firstField]}`
+            : ACCEPTANCE_TEST_MARKER;
+
+        const imageField = currentModelFields.find((field) => fieldMap[field] === 'Image');
+        const picture = imageField ? {
+            data: ACCEPTANCE_TEST_IMAGE_BASE64,
+            filename: 'manga_reader_synthetic_acceptance_20260908.png',
+            fields: [imageField],
+        } : undefined;
+        const url = localSettings.ankiConnectUrl || 'http://127.0.0.1:18765';
+
+        const verifyNote = (created: any): boolean => {
+            const createdTags: string[] = created?.tags || [];
+            const createdFields = created?.fields || {};
+            const markerPersisted = String(createdFields[firstField]?.value || '').includes(ACCEPTANCE_TEST_MARKER);
+            const imagePersisted = !imageField
+                || /<img src=["'][^"']+["']>/.test(String(createdFields[imageField]?.value || ''));
+            return created?.modelName === modelName
+                && createdTags.includes(ACCEPTANCE_TEST_TAG)
+                && markerPersisted
+                && imagePersisted;
+        };
+
+        showProgress('Checking the configured test note…');
+        try {
+            const eligibility = await canAddNotes(url, [{ deckName, modelName, fields }]);
+            if (!eligibility[0]) {
+                const escapedDeck = deckName.replace(/(["\\])/g, '\\$1');
+                const existingIds = await findNotes(url, `tag:${ACCEPTANCE_TEST_TAG} deck:"${escapedDeck}"`);
+                const existingNotes = existingIds.length ? await notesInfo(url, existingIds) : [];
+                closeDialog();
+                if (existingNotes.some(verifyNote)) {
+                    showAlert(
+                        'Anki test passed',
+                        `The existing synthetic note was verified in “${deckName}”. No second note was added.`,
+                    );
+                } else {
+                    showAlert(
+                        'Synthetic note already exists',
+                        'No note was added, but the duplicate could not be verified as this tagged acceptance note.',
+                    );
+                }
+                return;
+            }
+
+            const noteId = await addNote(
+                url,
+                deckName,
+                modelName,
+                fields,
+                [ACCEPTANCE_TEST_TAG],
+                picture,
+                undefined,
+                { allowDuplicate: false, duplicateScope: 'deck', recordMiningEvent: false },
+            );
+            if (typeof noteId !== 'number' || noteId <= 0) {
+                throw new Error('Anki did not return a valid note identifier.');
+            }
+
+            const [created] = await notesInfo(url, [noteId]);
+            if (!verifyNote(created)) {
+                throw new Error(
+                    'The note was created, but its returned fields, tag, model, or media did not match the preview.',
+                );
+            }
+
+            closeDialog();
+            showAlert(
+                'Anki test passed',
+                `One synthetic note was created and verified in “${deckName}”. It is tagged ${ACCEPTANCE_TEST_TAG}.`,
+            );
+        } catch (error) {
+            closeDialog();
+            showAlert('Anki test failed', error instanceof Error ? error.message : String(error));
+        }
+    };
+
+    const previewSyntheticAnkiTest = () => {
+        if (!localSettings.ankiDeck || !localSettings.ankiModel) {
+            showAlert('Anki test unavailable', 'Select a target deck and card type first.');
+            return;
+        }
+        const mappedFields = currentModelFields
+            .filter((field) => localSettings.ankiFieldMap?.[field] && localSettings.ankiFieldMap?.[field] !== 'None')
+            .map((field) => `${field} ← ${localSettings.ankiFieldMap?.[field]}`);
+        showDialog({
+            type: 'confirm',
+            title: 'Create synthetic Anki test note?',
+            message: (
+                <div style={{ textAlign: 'left' }}>
+                    <p>This creates exactly one synthetic note and verifies it through the on-device bridge.</p>
+                    <p>
+                        <strong>Deck:</strong> {localSettings.ankiDeck}<br />
+                        <strong>Card type:</strong> {localSettings.ankiModel}
+                    </p>
+                    <p style={{ whiteSpace: 'pre-line' }}>
+                        <strong>Mapped fields:</strong><br />
+                        {mappedFields.length
+                            ? mappedFields.join('\n')
+                            : 'None (the first field receives only a synthetic marker)'}
+                    </p>
+                    <p><strong>Tag:</strong> {ACCEPTANCE_TEST_TAG}</p>
+                    <p>No manga image, OCR text, or reading activity is used.</p>
+                </div>
+            ),
+            confirmText: 'Create and verify',
+            cancelText: 'Cancel',
+            onConfirm: runSyntheticAnkiTest,
+        });
     };
 
     const resetToDefaults = () => {
@@ -631,43 +599,6 @@ ${detail}`,
                     <h2>Settings</h2>
                     <input type="file" ref={fileInputRef} style={{ display: 'none' }} accept=".zip" multiple onChange={handleFileChange} />
 
-                    {/* --- UPDATE BANNER --- */}
-                    {updateStatus === 'downloading' && (
-                        <div style={{ backgroundColor: '#f39c12', color: 'white', padding: '15px', borderRadius: '5px', marginBottom: '15px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '5px' }}>
-                            <div style={{display: 'flex', alignItems: 'center', gap: '10px'}}>
-                                <div style={{
-                                    width: '18px', height: '18px', 
-                                    border: '3px solid rgba(255,255,255,0.3)', 
-                                    borderTop: '3px solid white', 
-                                    borderRadius: '50%',
-                                    animation: 'spin 1s linear infinite'
-                                }} />
-                                <b>Downloading Update...</b>
-                            </div>
-                            <small style={{opacity: 0.9}}>Please check your notification tray.</small>
-                            <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-                        </div>
-                    )}
-                    {updateStatus === 'ready' && (
-                        <div style={{ backgroundColor: '#27ae60', color: 'white', padding: '10px', borderRadius: '5px', marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span><b>Download Complete</b></span>
-                            <button type="button" onClick={handleInstall} style={{ backgroundColor: 'white', color: '#27ae60', border: 'none', fontWeight: 'bold', padding: '8px 15px', borderRadius: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
-                                Install Now
-                            </button>
-                        </div>
-                    )}
-                    {updateStatus === 'idle' && updateAvailable && (
-                        <div style={{ backgroundColor: '#3498db', color: 'white', padding: '10px', borderRadius: '5px', marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span><b>New Version:</b> {updateAvailable.version}</span>
-                            <button type="button" onClick={handleDownload} style={{ backgroundColor: 'white', color: '#2980b9', border: 'none', fontWeight: 'bold', padding: '8px 15px', borderRadius: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
-                                Download
-                            </button>
-                        </div>
-                    )}
-                    <div style={{ textAlign: 'center', marginBottom: '10px', color: '#666', fontSize: '0.9em' }}>
-                        Version: {appVersion}
-                    </div>
-
                     {/* --- POPUP DICTIONARY SECTION --- */}
                     <h3>Popup Dictionary</h3>
                     <div style={sectionBoxStyle}>
@@ -741,7 +672,7 @@ ${detail}`,
                                 Used when installing or resetting default dictionaries.
                             </div>
                             <div style={{ fontSize: '0.85em', color: '#aaa' }}>
-                                Dictionary import only runs after pressing <b>Finish</b> in Setup Wizard, or from explicit reset/import actions.
+                                Import dictionaries explicitly below; reading does not require completing a setup wizard.
                             </div>
                         </div>
 
@@ -1077,9 +1008,9 @@ ${detail}`,
                                         <label htmlFor="ankiUrl">AnkiConnect URL</label>
                                         <input 
                                             id="ankiUrl" 
-                                            value={localSettings.ankiConnectUrl ?? 'http://127.0.0.1:8765'} 
+                                            value={localSettings.ankiConnectUrl ?? 'http://127.0.0.1:18765'}
                                             onChange={(e) => handleChange('ankiConnectUrl', e.target.value)} 
-                                            placeholder="http://127.0.0.1:8765"
+                                            placeholder="http://127.0.0.1:18765"
                                         />
                                         <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
                                             Address where AnkiConnect is listening.
@@ -1419,6 +1350,32 @@ ${detail}`,
                                                                     </div>
                                                                 </div>
                                                             )}
+                                                        <div style={{
+                                                            marginTop: '20px',
+                                                            paddingTop: '15px',
+                                                            borderTop: '1px solid rgba(255,255,255,0.1)',
+                                                        }}>
+                                                            <button
+                                                                type="button"
+                                                                onClick={previewSyntheticAnkiTest}
+                                                                style={{
+                                                                    padding: '9px 12px',
+                                                                    cursor: 'pointer',
+                                                                    backgroundColor: 'rgba(46, 204, 113, 0.15)',
+                                                                    border: '1px solid rgba(46, 204, 113, 0.6)',
+                                                                    color: 'white',
+                                                                    borderRadius: '4px',
+                                                                }}
+                                                            >
+                                                                Preview synthetic test note
+                                                            </button>
+                                                            <div
+                                                                style={{ marginTop: '8px', fontSize: '0.85em', color: '#aaa' }}
+                                                            >
+                                                                Reviews the selected deck, model, mapping, tag, and
+                                                                generated test media before creating one note.
+                                                            </div>
+                                                        </div>
                                                     </div>
                                                 )}
                                             </>
@@ -1460,359 +1417,7 @@ ${detail}`,
                                 </div>
                             </label>
                         </div>
-                        {localSettings.debugMode && (
-                            <div style={{ marginTop: '12px' }}>
-                                <button
-                                    type="button"
-                                    onClick={openSetup}
-                                    style={{
-                                        padding: '8px 12px',
-                                        borderRadius: '4px',
-                                        border: '1px solid #444',
-                                        background: '#2a2a2e',
-                                        color: 'white',
-                                        cursor: 'pointer',
-                                    }}
-                                >
-                                    Open Setup Wizard
-                                </button>
-                            </div>
-                        )}
                     </div>
-
-                    <h3>Anime Settings</h3>
-                    <div style={sectionBoxStyle}>
-                        <div className="grid" style={{ marginBottom: '10px' }}>
-                            <label htmlFor="subtitleFontSize">Subtitle Font (px)</label>
-                            <input
-                                id="subtitleFontSize"
-                                type="number"
-                                step="1"
-                                min="8"
-                                max="64"
-                                value={localSettings.subtitleFontSize}
-                                onChange={(e) => handleChange('subtitleFontSize', parseInt(e.target.value, 10))}
-                            />
-                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
-                                Controls subtitle text size in the video player.
-                            </div>
-                            <label htmlFor="subtitleFontWeight">Subtitle Thickness</label>
-                            <input
-                                id="subtitleFontWeight"
-                                type="number"
-                                step="100"
-                                min="100"
-                                max="900"
-                                value={localSettings.subtitleFontWeight ?? 600}
-                                onChange={(e) => handleChange('subtitleFontWeight', parseInt(e.target.value, 10))}
-                            />
-                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
-                                Higher values make subtitles bolder and easier to read.
-                            </div>
-                            <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                    <label htmlFor="animePopupWidthValue">Width</label>
-                                    <div style={inlineInputWrapperStyle}>
-                                        <input
-                                            id="animePopupWidthValue"
-                                            type="number"
-                                            step={popupWidthUnit === 'px' ? '10' : '1'}
-                                            min={popupWidthUnit === 'px' ? '280' : '30'}
-                                            max={popupWidthUnit === 'px' ? '1920' : '100'}
-                                            value={popupWidthValue}
-                                            onChange={(e) => handleChange(
-                                                popupWidthUnit === 'px' ? 'animePopupWidthPx' : 'animePopupWidthPercent',
-                                                parseInt(e.target.value, 10),
-                                            )}
-                                            style={inlineInputStyle}
-                                        />
-                                        <div style={inlineInputActionsStyle}>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupWidthUnit', 'percent')}
-                                                style={unitToggleStyle(popupWidthUnit === 'percent')}
-                                            >
-                                                %
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupWidthUnit', 'px')}
-                                                style={unitToggleStyle(popupWidthUnit === 'px')}
-                                            >
-                                                px
-                                            </button>
-                                            <IconButton
-                                                size="small"
-                                                onClick={resetPopupWidth}
-                                                aria-label="Reset anime dictionary width"
-                                                style={{ padding: 4 }}
-                                            >
-                                                <RestartAltIcon fontSize="small" />
-                                            </IconButton>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                    <label htmlFor="animePopupHeightValue">Height</label>
-                                    <div style={inlineInputWrapperStyle}>
-                                        <input
-                                            id="animePopupHeightValue"
-                                            type="number"
-                                            step={popupHeightUnit === 'px' ? '10' : '1'}
-                                            min={popupHeightUnit === 'px' ? '200' : '20'}
-                                            max={popupHeightUnit === 'px' ? '1080' : '90'}
-                                            value={popupHeightValue}
-                                            onChange={(e) => handleChange(
-                                                popupHeightUnit === 'px' ? 'animePopupHeightPx' : 'animePopupHeightPercent',
-                                                parseInt(e.target.value, 10),
-                                            )}
-                                            style={inlineInputStyle}
-                                        />
-                                        <div style={inlineInputActionsStyle}>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupHeightUnit', 'percent')}
-                                                style={unitToggleStyle(popupHeightUnit === 'percent')}
-                                            >
-                                                %
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupHeightUnit', 'px')}
-                                                style={unitToggleStyle(popupHeightUnit === 'px')}
-                                            >
-                                                px
-                                            </button>
-                                            <IconButton
-                                                size="small"
-                                                onClick={resetPopupHeight}
-                                                aria-label="Reset anime dictionary height"
-                                                style={{ padding: 4 }}
-                                            >
-                                                <RestartAltIcon fontSize="small" />
-                                            </IconButton>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                    <label htmlFor="animePopupTopValue">Top Offset</label>
-                                    <div style={inlineInputWrapperStyle}>
-                                        <input
-                                            id="animePopupTopValue"
-                                            type="number"
-                                            step={popupTopUnit === 'px' ? '10' : '1'}
-                                            min={popupTopUnit === 'px' ? '0' : '0'}
-                                            max={popupTopUnit === 'px' ? '1600' : '80'}
-                                            value={popupTopValue}
-                                            onChange={(e) => handleChange(
-                                                popupTopUnit === 'px' ? 'animePopupTopOffsetPx' : 'animePopupTopOffsetPercent',
-                                                parseInt(e.target.value, 10),
-                                            )}
-                                            style={inlineInputStyle}
-                                        />
-                                        <div style={inlineInputActionsStyle}>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupTopOffsetUnit', 'percent')}
-                                                style={unitToggleStyle(popupTopUnit === 'percent')}
-                                            >
-                                                %
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupTopOffsetUnit', 'px')}
-                                                style={unitToggleStyle(popupTopUnit === 'px')}
-                                            >
-                                                px
-                                            </button>
-                                            <IconButton
-                                                size="small"
-                                                onClick={resetPopupTop}
-                                                aria-label="Reset anime dictionary top offset"
-                                                style={{ padding: 4 }}
-                                            >
-                                                <RestartAltIcon fontSize="small" />
-                                            </IconButton>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                    <label htmlFor="animePopupLeftValue">Horizontal Offset</label>
-                                    <div style={inlineInputWrapperStyle}>
-                                        <input
-                                            id="animePopupLeftValue"
-                                            type="number"
-                                            step={popupLeftUnit === 'px' ? '10' : '1'}
-                                            min={popupLeftUnit === 'px' ? '-1600' : '-50'}
-                                            max={popupLeftUnit === 'px' ? '1600' : '50'}
-                                            value={popupLeftValue}
-                                            onChange={(e) => handleChange(
-                                                popupLeftUnit === 'px' ? 'animePopupLeftOffsetPx' : 'animePopupLeftOffsetPercent',
-                                                parseInt(e.target.value, 10),
-                                            )}
-                                            style={inlineInputStyle}
-                                        />
-                                        <div style={inlineInputActionsStyle}>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupLeftOffsetUnit', 'percent')}
-                                                style={unitToggleStyle(popupLeftUnit === 'percent')}
-                                            >
-                                                %
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleChange('animePopupLeftOffsetUnit', 'px')}
-                                                style={unitToggleStyle(popupLeftUnit === 'px')}
-                                            >
-                                                px
-                                            </button>
-                                            <IconButton
-                                                size="small"
-                                                onClick={resetPopupLeft}
-                                                aria-label="Reset anime dictionary horizontal offset"
-                                                style={{ padding: 4 }}
-                                            >
-                                                <RestartAltIcon fontSize="small" />
-                                            </IconButton>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
-                                Adjust the anime popup dictionary size and position. Each field has its own unit toggle and reset.
-                            </div>
-                            <label htmlFor="animePopupCustomCss">Custom CSS</label>
-                            <div style={{ gridColumn: '1 / -1' }}>
-                                <div style={inlineInputWrapperStyle}>
-                                    <textarea
-                                        id="animePopupCustomCss"
-                                        rows={5}
-                                        value={localSettings.animePopupCustomCss ?? ''}
-                                        onChange={(e) => handleChange('animePopupCustomCss', e.target.value)}
-                                        placeholder={"background: rgba(12, 14, 18, 0.98);\nborder: 1px solid #4a5568;\n\n/* or full CSS: */\n.anime-dictionary-popup h5 { font-size: 1.5rem; }"}
-                                        style={{
-                                            ...inlineInputStyle,
-                                            width: '100%',
-                                            minHeight: '110px',
-                                            resize: 'vertical',
-                                            fontFamily: 'monospace',
-                                            lineHeight: 1.4,
-                                        }}
-                                    />
-                                    <div style={inlineInputActionsStyle}>
-                                        <IconButton
-                                            size="small"
-                                            onClick={resetAnimePopupCustomCss}
-                                            aria-label="Reset anime popup custom CSS"
-                                            style={{ padding: 4 }}
-                                        >
-                                            <RestartAltIcon fontSize="small" />
-                                        </IconButton>
-                                    </div>
-                                </div>
-                                <div style={{ fontSize: '0.85em', color: '#aaa', marginTop: '6px' }}>
-                                    Applies to <code>.anime-dictionary-popup</code>. Enter CSS declarations or full CSS rules.
-                                </div>
-                            </div>
-                            <label htmlFor="animePopupTheme">Anime Popup Theme</label>
-                            <select
-                                id="animePopupTheme"
-                                value={animePopupThemeValue}
-                                onChange={(e) => handleChange('animePopupTheme', e.target.value)}
-                                style={{ padding: '6px 8px' }}
-                            >
-                                <option value="dark">Dark</option>
-                                <option value="light">Light</option>
-                            </select>
-                            <label htmlFor="tapZonePercent">Video Tap Zone (%)</label>
-                            <input
-                                id="tapZonePercent"
-                                type="number"
-                                step="1"
-                                min="10"
-                                max="60"
-                                value={localSettings.tapZonePercent}
-                                onChange={(e) => handleChange('tapZonePercent', parseInt(e.target.value, 10))}
-                            />
-                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
-                                Controls the height of the top tap zone for play/pause.
-                            </div>
-                            <div style={{ gridColumn: '1 / -1' }}>
-                                <div className="checkboxes">
-                                    <label style={checkboxLabelStyle}>
-                                        <input
-                                            type="checkbox"
-                                            checked={localSettings.animeSubtitleHoverLookup}
-                                            onChange={(e) => handleChange('animeSubtitleHoverLookup', e.target.checked)}
-                                            style={checkboxInputStyle}
-                                        />
-                                        <div>
-                                            Pause on subtitle hover
-                                            <div style={{ opacity: 0.6, fontSize: '0.85em' }}>
-                                                Hovering subtitles pauses playback and opens the dictionary.
-                                            </div>
-                                        </div>
-                                    </label>
-                                    {localSettings.animeSubtitleHoverLookup && (
-                                        <label style={checkboxLabelStyle}>
-                                            <input
-                                                type="checkbox"
-                                                checked={localSettings.animeSubtitleHoverAutoResume}
-                                                onChange={(e) => handleChange('animeSubtitleHoverAutoResume', e.target.checked)}
-                                                style={checkboxInputStyle}
-                                            />
-                                            <div>
-                                                Auto resume on hover exit
-                                                <div style={{ opacity: 0.6, fontSize: '0.85em' }}>
-                                                    Resume playback when you move the cursor off subtitles.
-                                                </div>
-                                            </div>
-                                        </label>
-                                    )}
-                                </div>
-                            </div>
-                            <label htmlFor="jimakuApiKey">Jimaku API Key</label>
-                            <input
-                                id="jimakuApiKey"
-                                type="password"
-                                value={localSettings.jimakuApiKey ?? ''}
-                                onChange={(e) => handleChange('jimakuApiKey', e.target.value)}
-                                placeholder="Paste Jimaku API key"
-                            />
-                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
-                                Used to fetch Jimaku subtitles for the current episode.
-                                <div>
-                                    Get an API key from <a href="https://jimaku.cc" target="_blank" rel="noreferrer">jimaku.cc</a>
-                                </div>
-                                <div>
-                                    1. You can get a free key by signing up on the site: <a href="https://jimaku.cc/account" target="_blank" rel="noreferrer">https://jimaku.cc/account</a>
-                                </div>
-                                <div>2. Generate an API key under the "API" heading and copy it</div>
-                            </div>
-                        </div>
-                        <div style={{ marginTop: '16px' }}>
-                            <h4 style={{ marginTop: 0 }}>Hotkeys</h4>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                <div style={{ fontSize: '0.85em', color: '#aaa', textAlign: 'right' }}>
-                                    Click a hotkey to remove it, or use + to add a new one.
-                                </div>
-                                {ANIME_HOTKEYS.map((hotkey) => (
-                                    <AnimeHotkeyRow
-                                        key={hotkey}
-                                        hotkey={hotkey}
-                                        keys={animeHotkeys[hotkey] ?? []}
-                                        existingKeys={existingAnimeHotkeys}
-                                        onChange={(keys) => updateAnimeHotkey(hotkey, keys)}
-                                    />
-                                ))}
-                                <Stack sx={{ alignItems: 'flex-end' }}>
-                                    <ResetButton onClick={() => handleChange('animeHotkeys', DEFAULT_ANIME_HOTKEYS)} variant="outlined" />
-                                </Stack>
-                            </div>
-                        </div>
-                    </div>
-
                     <h3>Manga Settings</h3>
                     <div style={sectionBoxStyle}>
                         <h4 style={{ marginTop: 0 }}>General</h4>

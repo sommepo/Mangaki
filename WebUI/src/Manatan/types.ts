@@ -1,4 +1,10 @@
-export interface Rect { x: number; y: number; width: number; height: number; rotation?: number; }
+export interface Rect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    rotation?: number;
+}
 import { AnimeHotkey, DEFAULT_ANIME_HOTKEYS } from '@/Manatan/hotkeys/AnimeHotkeys.ts';
 export interface OcrBlock {
     text: string;
@@ -14,7 +20,17 @@ export interface SiteConfig {
 }
 
 // Added 'dark' to the allowed types
-export type ColorTheme = 'blue' | 'red' | 'green' | 'orange' | 'purple' | 'turquoise' | 'pink' | 'grey' | 'white' | 'dark';
+export type ColorTheme =
+    | 'blue'
+    | 'red'
+    | 'green'
+    | 'orange'
+    | 'purple'
+    | 'turquoise'
+    | 'pink'
+    | 'grey'
+    | 'white'
+    | 'dark';
 export type YomitanLanguage =
     | 'japanese'
     | 'english'
@@ -59,16 +75,14 @@ export type YomitanLanguage =
     | 'welsh'
     | 'cantonese';
 
-export type WordAudioSource =
-    | 'jpod101'
-    | 'language-pod-101'
-    | 'jisho'
-    | 'lingua-libre'
-    | 'wiktionary';
+export type WordAudioSource = 'jpod101' | 'language-pod-101' | 'jisho' | 'lingua-libre' | 'wiktionary';
 
 export type WordAudioSourceSelection = WordAudioSource | 'auto';
 
-export interface ServerSettingsData { authUsername?: string; authPassword?: string; }
+export interface ServerSettingsData {
+    authUsername?: string;
+    authPassword?: string;
+}
 
 export interface Settings {
     interactionMode: 'hover' | 'click';
@@ -112,6 +126,14 @@ export interface Settings {
     mobileMode: boolean;
     soloHoverMode: boolean;
     enableOverlay: boolean;
+    /** Experimental invisible hit regions over the original manga artwork. */
+    ocrBoxlessMode: boolean;
+    /** Explicit consent for the legacy Google Lens network OCR provider. */
+    allowGoogleLensOcr: boolean;
+    /** OCR provider used for reader requests and new bulk preparation jobs. */
+    ocrProvider: 'on_device' | 'self_hosted' | 'lens';
+    /** User-configured private Manga OCR/owoocr service base URL. */
+    selfHostedOcrUrl: string;
     enableDoubleClickEdit: boolean;
     enableDoubleTapZoom: boolean;
     disableStatusIcon: boolean;
@@ -157,8 +179,8 @@ export interface Settings {
     lnDisableAnimations: boolean;
     lnLockProgressBar?: boolean;
     lnShowCharProgress?: boolean;
-     lnAutoBookmark?: boolean;         
-    lnBookmarkDelay?: number;  
+    lnAutoBookmark?: boolean;
+    lnBookmarkDelay?: number;
 
     lnMarginTop?: number;
     lnMarginBottom?: number;
@@ -171,17 +193,16 @@ export interface Settings {
     lnClickZonePosition?: 'full' | 'start' | 'center' | 'end';
     lnClickZoneCoverage?: number;
     lnClickZonePlacement?: 'horizontal' | 'vertical';
-    lnEnableSwipe?: boolean;   
-    lnDragThreshold?: number;   
+    lnEnableSwipe?: boolean;
+    lnDragThreshold?: number;
     // Dropdown setting for grouping behavior
     resultGroupingMode: 'grouped' | 'flat';
     yomitanLookupNavigationMode: 'tabs' | 'stacked';
     yomitanLookupMaxHistory: number;
     yomitanShowKanjiInNormalLookup: boolean;
-
 }
 
-export type MergeState = { imgSrc: string; index: number; } | null;
+export type MergeState = { imgSrc: string; index: number } | null;
 
 export type OcrStatus = 'idle' | 'loading' | 'success' | 'error';
 
@@ -262,6 +283,7 @@ export interface DictPopupState {
     kanjiResults: any[];
     isLoading: boolean;
     systemLoading?: boolean;
+    /** Matched-word range and screen-space rectangles used for highlighting and popup placement. */
     highlight?: {
         imgSrc?: string;
         index?: number;
@@ -346,6 +368,10 @@ export const DEFAULT_SETTINGS: Settings = {
     mobileMode: false,
     soloHoverMode: true,
     enableOverlay: true,
+    ocrBoxlessMode: false,
+    allowGoogleLensOcr: false,
+    ocrProvider: 'on_device',
+    selfHostedOcrUrl: '',
     enableDoubleClickEdit: false,
     enableDoubleTapZoom: false,
     disableStatusIcon: false,
@@ -360,16 +386,22 @@ export const DEFAULT_SETTINGS: Settings = {
     mergeModifierKey: 'Control',
     site: {
         imageContainerSelectors: [
-            'div.muiltr-masn8', 'div.muiltr-79elbk', 'div.muiltr-u43rde',
-            'div.muiltr-1r1or1s', 'div.muiltr-18sieki', 'div.muiltr-cns6dc',
-            '.MuiBox-root.muiltr-1noqzsz', '.MuiBox-root.muiltr-1tapw32',
+            'div.muiltr-masn8',
+            'div.muiltr-79elbk',
+            'div.muiltr-u43rde',
+            'div.muiltr-1r1or1s',
+            'div.muiltr-18sieki',
+            'div.muiltr-cns6dc',
+            '.MuiBox-root.muiltr-1noqzsz',
+            '.MuiBox-root.muiltr-1tapw32',
             'img[src*="/api/v1/manga/"]',
+            'img[src*="/api/fork/volumes/"]',
         ],
         overflowFixSelector: '.MuiBox-root.muiltr-13djdhf',
         contentRootSelector: '#root',
     },
     ankiConnectEnabled: false,
-    ankiConnectUrl: 'http://127.0.0.1:8765',
+    ankiConnectUrl: 'http://127.0.0.1:18765',
     ankiImageQuality: 0.92,
     ankiEnableCropper: false,
     ankiDownscaleMaxWidth: undefined,

@@ -288,6 +288,16 @@ impl AppState {
         );
     }
 
+    pub fn delete_cache_entry(&self, cache_key: &str) -> bool {
+        let Ok(conn) = self.pool.get() else {
+            warn!("Failed to get DB connection for delete_cache_entry");
+            return false;
+        };
+        conn.execute("DELETE FROM ocr_cache WHERE cache_key = ?", params![cache_key])
+            .map(|deleted| deleted > 0)
+            .unwrap_or(false)
+    }
+
     pub fn clear_cache(&self) {
         let Ok(conn) = self.pool.get() else {
             warn!("Failed to get DB connection for clear_cache");

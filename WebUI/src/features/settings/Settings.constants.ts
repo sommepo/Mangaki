@@ -86,8 +86,8 @@ export const SERVER_SETTINGS_METADATA_DEFAULT: MetadataServerSettings = {
 
     // themes
     appTheme: 'default',
-    themeMode: ThemeMode.SYSTEM,
-    shouldUsePureBlackMode: false,
+    themeMode: ThemeMode.DARK,
+    shouldUsePureBlackMode: true,
     customThemes: {},
     mangaThumbnailBackdrop: true,
     mangaDynamicColorSchemes: true,

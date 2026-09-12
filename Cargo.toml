@@ -8,6 +8,7 @@ members = [
     "crates/ocr-server",
     "crates/sync-server",
     "crates/yomitan-server",
+    "crates/manga-reader-core",
 ]
 exclude = ["bin/manatan"]
 resolver = "2"
@@ -81,6 +82,7 @@ manatan-server-public = { git = "https://github.com/KolbyML/Manatan-Server-Publi
 manatan-sync-server = { path = "crates/sync-server" }
 manatan-novel-server = { path = "crates/novel-server" }
 manatan-yomitan-server = { path = "crates/yomitan-server" }
+manga-reader-core = { path = "crates/manga-reader-core" }
 
 [profile.test]
 inherits = "release"

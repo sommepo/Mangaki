@@ -48,6 +48,10 @@ const BaseReaderOverlayHeaderMobile = ({ isVisible, ref }: MobileHeaderProps & {
 
     const { id: mangaId, title } = manga ?? DEFAULT_MANGA;
     const { id: chapterId, name, realUrl, isBookmarked } = currentChapter ?? FALLBACK_CHAPTER;
+    const forkSeriesId = manga?.sourceId?.startsWith('fork:') ? manga.sourceId.slice('fork:'.length) : undefined;
+    const mangaPath = forkSeriesId
+        ? `/fork/series/${encodeURIComponent(forkSeriesId)}`
+        : AppRoutes.manga.path(mangaId);
 
     return (
         <Slide direction="down" in={isVisible} ref={ref}>
@@ -74,7 +78,7 @@ const BaseReaderOverlayHeaderMobile = ({ isVisible, ref }: MobileHeaderProps & {
                                 <TypographyMaxLines lines={1} component="h1" variant="h5">
                                     <Link
                                         component={RouterLink}
-                                        to={AppRoutes.manga.path(mangaId)}
+                                        to={mangaPath}
                                         sx={{ textDecoration: 'none', color: 'inherit' }}
                                     >
                                         {/* FIX 1: Manga Title */}
@@ -93,8 +97,8 @@ const BaseReaderOverlayHeaderMobile = ({ isVisible, ref }: MobileHeaderProps & {
                         <LoadingPlaceholder />
                     )}
                 </Stack>
-                <ReaderLibraryButton />
-                <ReaderBookmarkButton id={chapterId} isBookmarked={isBookmarked} />
+                {!forkSeriesId && <ReaderLibraryButton />}
+                {!forkSeriesId && <ReaderBookmarkButton id={chapterId} isBookmarked={isBookmarked} />}
                 <IconButton {...bindTrigger(popupState)} color="inherit">
                     <MoreVertIcon />
                 </IconButton>

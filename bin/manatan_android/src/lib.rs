@@ -1,4 +1,5 @@
 #![cfg(target_os = "android")]
+mod fork_api;
 use std::{
     collections::VecDeque,
     ffi::{CString, c_void},
@@ -8,17 +9,17 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
-    http::{Method, StatusCode, Uri},
+    http::{StatusCode, Uri},
     response::IntoResponse,
-    routing::any,
+    routing::get,
 };
 use eframe::egui;
 use flate2::read::GzDecoder;
@@ -33,11 +34,9 @@ use manatan_server_public::{
     app::build_router_without_cors, build_state, config::Config as ManatanServerConfig,
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde::Serialize;
 use tar::Archive;
 use tokio::{fs as tokio_fs, net::TcpListener};
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, trace, warn};
 use tracing_log::LogTracer;
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
@@ -49,67 +48,8 @@ lazy_static! {
 
 static WEBUI_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-const TACHI_DATA_DIR_NAME: &str = "tachidesk_data";
-const DEFAULT_GOOGLE_OAUTH_BROKER_ENDPOINT: &str = "https://manatan.com/auth/google";
-
-fn env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| match value.to_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn normalized_env_var(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn set_runtime_env_var(key: &str, value: &str) {
-    if normalized_env_var(key).is_some() {
-        return;
-    }
-
-    unsafe {
-        std::env::set_var(key, value);
-    }
-}
-
-fn configure_oauth_broker_env() {
-    let broker_token = normalized_env_var("MANATAN_GOOGLE_OAUTH_BROKER_TOKEN").or_else(|| {
-        option_env!("MANATAN_GOOGLE_OAUTH_BROKER_TOKEN_COMPILED")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    });
-
-    let Some(broker_token) = broker_token else {
-        warn!("No OAuth broker token configured for Android runtime");
-        return;
-    };
-
-    let broker_endpoint = normalized_env_var("MANATAN_GOOGLE_OAUTH_BROKER_ENDPOINT")
-        .or_else(|| {
-            option_env!("MANATAN_GOOGLE_OAUTH_BROKER_ENDPOINT_COMPILED")
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_GOOGLE_OAUTH_BROKER_ENDPOINT.to_string());
-
-    set_runtime_env_var("MANATAN_GOOGLE_OAUTH_BROKER_TOKEN", &broker_token);
-    set_runtime_env_var("MANATAN_GOOGLE_OAUTH_BROKER_ENDPOINT", &broker_endpoint);
-    set_runtime_env_var("MANATAN_BROKER_TOKEN", &broker_token);
-    set_runtime_env_var("MANATAN_BROKER_ENDPOINT", &broker_endpoint);
-
-    info!(
-        "Configured OAuth broker for Android runtime using endpoint {}",
-        broker_endpoint
-    );
-}
+const TACHI_DATA_DIR_NAME: &str = "manga_reader_backend";
+const APP_HTTP_PORT: u16 = 14568;
 
 fn get_files_dir_from_context(env: &mut jni::JNIEnv, context: &JObject) -> Option<PathBuf> {
     let dir_obj = env
@@ -320,18 +260,14 @@ fn migrate_legacy_shared_root(legacy_root: &Path, new_root: &Path) {
 }
 
 fn resolve_manatan_shared_root_with_migration(app: &AndroidApp) -> Option<PathBuf> {
-    let storage_root = get_external_storage_root(app)?;
-    let legacy_root = storage_root.join("Mangatan");
-    let new_root = storage_root.join("Manatan");
-
-    migrate_legacy_shared_root(&legacy_root, &new_root);
-
+    // Never inspect or migrate stock Manatan's shared folders. The fork uses
+    // its package-scoped external directory until a user grants a SAF tree.
+    let new_root = get_external_files_dir(app)?.join("manga-reader-fork");
     if let Err(err) = fs::create_dir_all(&new_root) {
         warn!(
-            "Failed to create shared Manatan root {}: {err}",
+            "Failed to create package-scoped Manga Reader root {}: {err}",
             new_root.display()
         );
-        // Still return the intended path so callers default to external storage.
     }
 
     Some(new_root)
@@ -398,30 +334,26 @@ fn prepare_shared_local_media_dirs(
     app: &AndroidApp,
     legacy_bases: &[PathBuf],
     fallback_base: &Path,
-) -> (PathBuf, PathBuf, PathBuf) {
+) -> (PathBuf, PathBuf) {
     // Prefer shared external storage so users can manage files directly.
     let shared_root = resolve_manatan_shared_root_with_migration(app);
 
-    let (local_manga_dir, local_anime_dir, local_novel_dir) = if let Some(shared_root) = shared_root {
+    let (local_manga_dir, compatibility_dir) = if let Some(shared_root) = shared_root {
         (
             shared_root.join("local-manga"),
-            shared_root.join("local-anime"),
-            shared_root.join("local-novel"),
+            shared_root.join(".backend-compat-unused"),
         )
     } else {
         // Fallback: app data storage.
         (
             fallback_base.join("local-manga"),
-            fallback_base.join("local-anime"),
-            fallback_base.join("local-novel"),
+            fallback_base.join(".backend-compat-unused"),
         )
     };
 
     // Migrate any existing legacy directories (internal/app-external) to the shared defaults.
     for base in legacy_bases {
         migrate_internal_dir_to_external(&base.join("local-manga"), &local_manga_dir);
-        migrate_internal_dir_to_external(&base.join("local-anime"), &local_anime_dir);
-        migrate_internal_dir_to_external(&base.join("local-novel"), &local_novel_dir);
     }
 
     // Ensure directories exist.
@@ -431,24 +363,11 @@ fn prepare_shared_local_media_dirs(
             local_manga_dir.display()
         );
     }
-    if let Err(err) = fs::create_dir_all(&local_anime_dir) {
-        warn!(
-            "Failed to create local-anime directory {}: {err}",
-            local_anime_dir.display()
-        );
-    }
-    if let Err(err) = fs::create_dir_all(&local_novel_dir) {
-        warn!(
-            "Failed to create local-novel directory {}: {err}",
-            local_novel_dir.display()
-        );
-    }
-
     ensure_nomedia(&local_manga_dir);
-    ensure_nomedia(&local_anime_dir);
-    ensure_nomedia(&local_novel_dir);
+    let _ = fs::create_dir_all(&compatibility_dir);
+    ensure_nomedia(&compatibility_dir);
 
-    (local_manga_dir, local_anime_dir, local_novel_dir)
+    (local_manga_dir, compatibility_dir)
 }
 
 fn should_skip_app_data_entry(name: &str) -> bool {
@@ -533,37 +452,11 @@ fn migrate_app_data_base_to_shared(src_base: &Path, dst_base: &Path) {
 }
 
 fn resolve_shared_app_data_dir_with_migration(
-    app: &AndroidApp,
+    _app: &AndroidApp,
     internal_files_dir: &Path,
 ) -> PathBuf {
-    // Desired location: shared storage root.
-    let shared_root = resolve_manatan_shared_root_with_migration(app);
-    let shared_app_data = shared_root.map(|root| root.join("app-data"));
-
-    // Legacy location used by some versions: app-specific external.
-    let external_app_data = get_external_files_dir(app);
-
-    // Best effort: prefer shared root, but fall back so the app can still run.
-    if let Some(shared_app_data) = shared_app_data {
-        if fs::create_dir_all(&shared_app_data).is_ok() {
-            migrate_app_data_base_to_shared(internal_files_dir, &shared_app_data);
-            if let Some(external_app_data) = external_app_data.as_ref() {
-                migrate_app_data_base_to_shared(external_app_data, &shared_app_data);
-            }
-            return shared_app_data;
-        }
-        warn!(
-            "Shared root app-data unavailable at {}; falling back",
-            shared_app_data.display()
-        );
-    }
-
-    if let Some(external_app_data) = external_app_data {
-        // Keep older behavior as a fallback.
-        migrate_app_data_base_to_shared(internal_files_dir, &external_app_data);
-        return external_app_data;
-    }
-
+    // Databases, settings, categories, progress, stats, and OCR metadata are
+    // private app data. Explicit export/restore is the only sharing boundary.
     internal_files_dir.to_path_buf()
 }
 
@@ -604,45 +497,6 @@ fn resolve_tachidesk_data_dir_with_migration(app: &AndroidApp, fallback_base: &P
         .internal_data_path()
         .unwrap_or_else(|| fallback_base.to_path_buf());
     let internal_dir = internal_base.join(TACHI_DATA_DIR_NAME);
-
-    let external_app_dir = get_external_files_dir(app);
-    let external_dir = external_app_dir
-        .as_ref()
-        .map(|b| b.join(TACHI_DATA_DIR_NAME));
-
-    let shared_root = resolve_manatan_shared_root_with_migration(app);
-    let shared_dir = shared_root.as_ref().map(|b| b.join(TACHI_DATA_DIR_NAME));
-
-    // Preferred: shared storage root.
-    if let Some(shared_dir) = shared_dir {
-        if shared_dir.exists() {
-            return shared_dir;
-        }
-
-        // Migrate from older locations, preferring app-external.
-        if let Some(external_dir) = external_dir.as_ref() {
-            migrate_internal_dir_to_external(external_dir, &shared_dir);
-        }
-        migrate_internal_dir_to_external(&internal_dir, &shared_dir);
-
-        if let Err(err) = fs::create_dir_all(&shared_dir) {
-            warn!(
-                "Failed to create shared tachidesk data dir {}: {err}",
-                shared_dir.display()
-            );
-        }
-        return shared_dir;
-    }
-
-    // Fallback: app-specific external, then internal.
-    if let Some(external_dir) = external_dir {
-        if external_dir.exists() {
-            return external_dir;
-        }
-        migrate_internal_dir_to_external(&internal_dir, &external_dir);
-        let _ = fs::create_dir_all(&external_dir);
-        return external_dir;
-    }
 
     let _ = fs::create_dir_all(&internal_dir);
     internal_dir
@@ -718,10 +572,10 @@ fn start_foreground_service(app: &AndroidApp) {
         .find_class("android/content/Context")
         .expect("Failed to find Context class");
     let service_class_name = env
-        .new_string("com.mangatan.app.MangatanService")
+        .new_string("dev.local.mangareader.MangatanService")
         .expect("Failed to create string");
 
-    let pkg_name = get_package_name(&mut env, &context).unwrap_or("com.mangatan.app".to_string());
+    let pkg_name = get_package_name(&mut env, &context).unwrap_or("dev.local.mangareader".to_string());
     let pkg_name_jstr = env.new_string(&pkg_name).unwrap();
 
     let _ = env
@@ -808,7 +662,7 @@ struct ManatanApp {
     #[cfg(feature = "native_webview")]
     webview_launcher: Box<dyn Fn() + Send + Sync>,
     #[cfg(feature = "native_webview")]
-    webview_launched: bool,
+    webview_last_launch: Option<Instant>,
 }
 
 impl ManatanApp {
@@ -822,7 +676,7 @@ impl ManatanApp {
             #[cfg(feature = "native_webview")]
             webview_launcher,
             #[cfg(feature = "native_webview")]
-            webview_launched: false,
+            webview_last_launch: None,
         }
     }
 }
@@ -837,58 +691,26 @@ impl eframe::App for ManatanApp {
         // --- NATIVE WEBVIEW MODE ---
         #[cfg(feature = "native_webview")]
         {
-            if is_ready && !self.webview_launched {
+            let should_launch = self
+                .webview_last_launch
+                .is_none_or(|last_launch| last_launch.elapsed() >= Duration::from_secs(2));
+            if is_ready && should_launch {
                 info!("Server ready, auto-launching WebView...");
                 (self.webview_launcher)();
-                self.webview_launched = true;
+                self.webview_last_launch = Some(Instant::now());
             }
 
-            // Render a Loading Screen WITH LOGS
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    // Reduce top spacing slightly to fit logs
-                    ui.add_space(ctx.screen_rect().height() * 0.1);
+            // update() is suspended while WebviewActivity is in front. If Android
+            // later exposes this host again, retry after the short guard interval
+            // instead of leaving the user on a permanent black surface.
+            ctx.request_repaint_after(Duration::from_millis(250));
 
-                    if !is_ready {
-                        ui.spinner();
-                        ui.add_space(20.0);
-                        ui.heading("Manatan is starting...");
-                        ui.label("Please wait while the server initializes.");
-                    } else {
-                        // UI in case user backs out of WebView
-                        ui.heading("Manatan is Running");
-                        ui.add_space(20.0);
-                        if ui.button("Return to App").clicked() {
-                            (self.webview_launcher)();
-                        }
-                    }
-                });
-
-                // --- ADDED LOG DISPLAY HERE ---
-                ui.add_space(20.0);
-                ui.separator();
-                ui.heading("Logs");
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                        if let Some(style) = ui
-                            .style_mut()
-                            .text_styles
-                            .get_mut(&egui::TextStyle::Monospace)
-                        {
-                            style.size = 10.0;
-                        }
-
-                        if let Ok(logs) = LOG_BUFFER.lock() {
-                            for line in logs.iter() {
-                                ui.label(line);
-                            }
-                        }
-                    });
-            });
+            // The native activity only owns the embedded services. Keep its surface
+            // blank while the WebView starts and if the WebView task is dismissed;
+            // runtime logs remain in logcat instead of becoming product UI.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::default().fill(egui::Color32::BLACK))
+                .show(ctx, |_ui| {});
             return; // Skip drawing the standard debug GUI
         }
 
@@ -917,7 +739,7 @@ impl eframe::App for ManatanApp {
                     .add(egui::Button::new("Open WebUI").min_size(egui::vec2(200.0, 50.0)))
                     .clicked()
                 {
-                    ctx.open_url(egui::OpenUrl::new_tab("http://127.0.0.1:4568"));
+                    ctx.open_url(egui::OpenUrl::new_tab("http://127.0.0.1:14568"));
                     info!("User clicked Open WebUI");
                 }
 
@@ -962,21 +784,9 @@ fn android_main(app: AndroidApp) {
 
     info!("Starting Manatan...");
 
-    check_and_request_permissions(&app);
-
-    // --- CONDITIONALLY REQUEST PERMISSIONS ---
-    #[cfg(not(feature = "native_webview"))]
-    {
-        // Only ask for battery/notifications if we are in DEBUG/Server mode
-        ensure_battery_unrestricted(&app);
-    }
-
-    // We still need locks to keep the server running
-    acquire_wifi_lock(&app);
-    acquire_wake_lock(&app);
-
-    // Service ensures the process isn't killed immediately
-    start_foreground_service(&app);
+    // SAF, Anki, and notification permissions are requested only from the
+    // corresponding user action. The foreground reader does not need broad
+    // storage access, permanent wake/Wi-Fi locks, or a startup service.
 
     let internal_files_dir = app.internal_data_path().expect("Failed to get data path");
     let files_dir = resolve_shared_app_data_dir_with_migration(&app, &internal_files_dir);
@@ -988,7 +798,7 @@ fn android_main(app: AndroidApp) {
         external_app_dir,
         files_dir.clone(),
     ];
-    let (default_local_manga_dir, default_local_anime_dir, default_local_novel_dir) =
+    let (default_local_manga_dir, default_local_anime_dir) =
         prepare_shared_local_media_dirs(&app, &legacy_bases, &files_dir);
 
     let app_bg = app.clone();
@@ -1007,7 +817,6 @@ fn android_main(app: AndroidApp) {
 
     let default_local_manga_dir_clone = default_local_manga_dir.clone();
     let default_local_anime_dir_clone = default_local_anime_dir.clone();
-    let default_local_novel_dir_clone = default_local_novel_dir.clone();
     thread::spawn(move || {
         info!("Starting Web Server Runtime...");
         let rt = tokio::runtime::Runtime::new().expect("Failed to build Tokio runtime");
@@ -1016,7 +825,7 @@ fn android_main(app: AndroidApp) {
             let client = Client::new();
 
             loop {
-                let request = client.get("http://127.0.0.1:4568/health");
+                let request = client.get("http://127.0.0.1:14568/health");
 
                 match request.send().await {
                     Ok(resp) if resp.status().is_success() => {
@@ -1047,7 +856,6 @@ fn android_main(app: AndroidApp) {
                 internal_runtime_dir,
                 default_local_manga_dir_clone,
                 default_local_anime_dir_clone,
-                default_local_novel_dir_clone,
             )
             .await
             {
@@ -1126,11 +934,11 @@ fn launch_webview_activity(app: &AndroidApp) {
         .expect("Failed to create Intent");
 
     // Helper to get package name
-    let pkg_name = get_package_name(&mut env, &context).unwrap_or("com.mangatan.app".to_string());
+    let pkg_name = get_package_name(&mut env, &context).unwrap_or("dev.local.mangareader".to_string());
     let pkg_name_jstr = env.new_string(&pkg_name).unwrap();
 
     // Target the new Activity
-    let activity_class_name = env.new_string("com.mangatan.app.WebviewActivity").unwrap();
+    let activity_class_name = env.new_string("dev.local.mangareader.WebviewActivity").unwrap();
 
     let _ = env
         .call_method(
@@ -1159,10 +967,8 @@ async fn start_web_server(
     internal_runtime_dir: PathBuf,
     default_local_manga_dir: PathBuf,
     default_local_anime_dir: PathBuf,
-    default_local_novel_dir: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Initializing Manatan Server on port 4568...");
-    configure_oauth_broker_env();
 
     // Pick a WebUI directory that actually contains an index.html.
     // We also support an extra nested folder level (some tar layouts unpack into a subdir).
@@ -1201,26 +1007,26 @@ async fn start_web_server(
     let manatan_migrate_path = std::env::var("MANATAN_MIGRATE_PATH").ok();
     let manatan_runtime_url =
         std::env::var("MANATAN_JAVA_URL").unwrap_or_else(|_| "http://127.0.0.1:4566".to_string());
-    let tracker_remote_search = env_bool("MANATAN_TRACKER_REMOTE_SEARCH", true);
+    // The manga-only fork does not perform account/tracker or extension-index
+    // network work. Required user-owned sources are configured via /api/fork.
+    let tracker_remote_search = false;
     let tracker_search_ttl_seconds = std::env::var("MANATAN_TRACKER_SEARCH_TTL_SECONDS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(3600);
     let downloads_path = std::env::var("MANATAN_DOWNLOADS_PATH")
         .unwrap_or_else(|_| data_dir.join("downloads").to_string_lossy().to_string());
-    let aidoku_index_url = std::env::var("MANATAN_AIDOKU_INDEX").unwrap_or_default();
-    let aidoku_enabled = env_bool("MANATAN_AIDOKU_ENABLED", true);
+    let aidoku_index_url = String::new();
+    let aidoku_enabled = false;
     let aidoku_cache_path = std::env::var("MANATAN_AIDOKU_CACHE")
         .unwrap_or_else(|_| data_dir.join("aidoku").to_string_lossy().to_string());
     let local_manga_path = std::env::var("MANATAN_LOCAL_MANGA_PATH")
         .unwrap_or_else(|_| default_local_manga_dir.to_string_lossy().to_string());
     let local_anime_path = std::env::var("MANATAN_LOCAL_ANIME_PATH")
         .unwrap_or_else(|_| default_local_anime_dir.to_string_lossy().to_string());
-    let local_novel_path = std::env::var("MANATAN_LOCAL_LN_PATH")
-        .unwrap_or_else(|_| default_local_novel_dir.to_string_lossy().to_string());
     let manatan_config = ManatanServerConfig {
-        host: "0.0.0.0".to_string(),
-        port: 4568,
+        host: "127.0.0.1".to_string(),
+        port: APP_HTTP_PORT,
         java_runtime_url: manatan_runtime_url,
         webview_enabled: false,
         aidoku_index_url,
@@ -1235,56 +1041,25 @@ async fn start_web_server(
         local_anime_path,
     };
 
-    // Note: ManatanServerConfig might need update if it's supposed to hold local_novel_path
-    // but the actual router initialization below uses it.
     let manatan_state = build_state(manatan_config).await?;
     let manatan_router = build_router_without_cors(manatan_state);
-    let sync_router = manatan_sync_server::create_router(data_dir.clone());
-    let novel_router = manatan_novel_server::create_router(data_dir.clone(), PathBuf::from(local_novel_path.clone()));
+    let fork_router = fork_api::router(fork_api::ForkApiState::load(&data_dir));
 
     let ocr_router = manatan_ocr_server::create_router(data_dir.clone());
     let yomitan_router = manatan_yomitan_server::create_router(data_dir.clone());
     let audio_router = manatan_audio_server::create_router(data_dir.clone());
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::ACCEPT,
-            axum::http::header::ORIGIN,
-            axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-            axum::http::header::ACCESS_CONTROL_REQUEST_METHOD,
-        ])
-        .allow_credentials(true);
-
     let app = Router::new()
-        .route("/api/v1/webview", any(webview_shim_handler))
-        .route("/api/system/version", any(current_version_handler))
-        .route(
-            "/api/system/download-update",
-            axum::routing::post(download_update_handler),
-        )
-        .route("/api/system/install-update", any(install_update_handler))
-        .nest("/api/sync", sync_router)
-        .nest("/api/novel", novel_router)
+        .route("/api/system/version", get(current_version_handler))
+        .nest("/api/fork", fork_router)
         .nest_service("/api/ocr", ocr_router)
         .nest_service("/api/yomitan", yomitan_router)
         .nest_service("/api/audio", audio_router)
         .merge(manatan_router)
-        .fallback(serve_react_app)
-        .layer(cors);
+        .fallback(serve_react_app);
 
-    let listener = TcpListener::bind("0.0.0.0:4568").await?;
-    info!("✅ Web Server listening on 0.0.0.0:4568");
+    let listener = TcpListener::bind(("127.0.0.1", APP_HTTP_PORT)).await?;
+    info!("Web server listening on loopback:{APP_HTTP_PORT}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -1574,7 +1349,7 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
 
             if let Some(shared_root) = resolve_manatan_shared_root_with_migration(&app) {
                 let local_sources_dir = shared_root.join("local-sources");
-                let local_anime_dir = shared_root.join("local-anime");
+                let backend_compat_dir = shared_root.join(".backend-compat-unused");
                 let local_manga_dir = shared_root.join("local-manga");
 
                 info!(
@@ -1583,10 +1358,10 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
                 );
                 let _ = std::fs::create_dir_all(&local_sources_dir);
                 info!(
-                    "Ensuring local anime directory exists: {}",
-                    local_anime_dir.display()
+                    "Ensuring private-backend compatibility directory exists: {}",
+                    backend_compat_dir.display()
                 );
-                let _ = std::fs::create_dir_all(&local_anime_dir);
+                let _ = std::fs::create_dir_all(&backend_compat_dir);
                 info!(
                     "Ensuring local manga directory exists: {}",
                     local_manga_dir.display()
@@ -1594,7 +1369,7 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
                 let _ = std::fs::create_dir_all(&local_manga_dir);
 
                 ensure_nomedia(&local_sources_dir);
-                ensure_nomedia(&local_anime_dir);
+                ensure_nomedia(&backend_compat_dir);
                 ensure_nomedia(&local_manga_dir);
 
                 if !server_conf_exists {
@@ -1605,7 +1380,7 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
                     ));
                     options_vec.push(format!(
                         "-Dsuwayomi.tachidesk.config.server.localAnimeSourcePath={}",
-                        local_anime_dir.display()
+                        backend_compat_dir.display()
                     ));
 
                     // --- IMPORTANT: Create pending marker HERE ---
@@ -2038,7 +1813,7 @@ fn check_and_request_permissions(app: &AndroidApp) {
         Ok(name) => name,
         Err(e) => {
             info!("Failed to get package name via JNI: {:?}", e);
-            "com.mangatan.app".to_string()
+            "dev.local.mangareader".to_string()
         }
     };
     info!("Using Package Name: {}", pkg_name);
@@ -2330,14 +2105,6 @@ struct VersionResponse {
     update_status: String,
 }
 
-#[derive(Deserialize)]
-struct UpdateRequest {
-    url: String,
-    filename: String,
-}
-
-static LAST_DOWNLOAD_ID: AtomicI64 = AtomicI64::new(-1);
-
 async fn current_version_handler() -> impl IntoResponse {
     let version = env!("CARGO_PKG_VERSION");
     #[cfg(feature = "native_webview")]
@@ -2345,513 +2112,13 @@ async fn current_version_handler() -> impl IntoResponse {
     #[cfg(not(feature = "native_webview"))]
     let variant = "browser";
 
-    let update_status = check_update_status();
+    let update_status = "disabled-for-fork".to_string();
 
     Json(VersionResponse {
         version: version.to_string(),
         variant: variant.to_string(),
         update_status,
     })
-}
-
-async fn download_update_handler(Json(payload): Json<UpdateRequest>) -> impl IntoResponse {
-    match native_download_manager(&payload.url, &payload.filename) {
-        Ok(_) => (StatusCode::OK, "Download started".to_string()),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed: {}", e)),
-    }
-}
-
-async fn install_update_handler() -> impl IntoResponse {
-    match native_trigger_install() {
-        Ok(_) => (StatusCode::OK, "Install started".to_string()),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed: {}", e)),
-    }
-}
-
-// --- NATIVE HELPERS ---
-
-fn check_update_status() -> String {
-    if let Ok(s) = check_update_status_safe() {
-        s
-    } else {
-        "idle".to_string()
-    }
-}
-
-fn check_update_status_safe() -> Result<String, Box<dyn std::error::Error>> {
-    let id = LAST_DOWNLOAD_ID.load(Ordering::Relaxed);
-    if id == -1 {
-        return Ok("idle".to_string());
-    }
-
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
-    let mut env = vm.attach_current_thread()?;
-    let context_obj = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-
-    let dm_str = env.new_string("download")?;
-    let dm = env
-        .call_method(
-            &context_obj,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[JValue::Object(&dm_str)],
-        )?
-        .l()?;
-
-    let query_cls = env.find_class("android/app/DownloadManager$Query")?;
-    let query = env.new_object(query_cls, "()V", &[])?;
-    let id_array = env.new_long_array(1)?;
-    env.set_long_array_region(&id_array, 0, &[id])?;
-    env.call_method(
-        &query,
-        "setFilterById",
-        "([J)Landroid/app/DownloadManager$Query;",
-        &[JValue::Object(&id_array)],
-    )?;
-
-    let cursor = env
-        .call_method(
-            &dm,
-            "query",
-            "(Landroid/app/DownloadManager$Query;)Landroid/database/Cursor;",
-            &[JValue::Object(&query)],
-        )?
-        .l()?;
-
-    if env.call_method(&cursor, "moveToFirst", "()Z", &[])?.z()? {
-        let status_str = env.new_string("status")?;
-        let col_idx = env
-            .call_method(
-                &cursor,
-                "getColumnIndex",
-                "(Ljava/lang/String;)I",
-                &[JValue::Object(&status_str)],
-            )?
-            .i()?;
-        if col_idx >= 0 {
-            let status = env
-                .call_method(&cursor, "getInt", "(I)I", &[JValue::Int(col_idx)])?
-                .i()?;
-            if status == 1 || status == 2 {
-                return Ok("downloading".to_string());
-            }
-            if status == 8 {
-                return Ok("ready".to_string());
-            }
-        }
-    }
-    Ok("idle".to_string())
-}
-
-// --- AUTOMATIC MONITOR TASK ---
-// This loops in a background thread to auto-trigger install when done
-fn monitor_download_completion(id: i64) {
-    info!("👀 Starting download monitor for ID: {}", id);
-    loop {
-        // Poll every 2 seconds
-        thread::sleep(Duration::from_secs(2));
-
-        // Check if ID has changed (new download started) - if so, abort this monitor
-        if LAST_DOWNLOAD_ID.load(Ordering::Relaxed) != id {
-            info!("🛑 Monitor aborted (New download started)");
-            break;
-        }
-
-        // Check Status
-        if let Ok(status) = check_update_status_safe() {
-            if status == "ready" {
-                info!("✅ Download {} complete! Triggering install...", id);
-                if let Err(e) = native_trigger_install() {
-                    error!("❌ Automatic install trigger failed: {}", e);
-                }
-                break; // Job done
-            }
-            if status == "idle" {
-                // Means it failed or was cancelled
-                info!("🛑 Monitor aborted (Download idle/failed)");
-                break;
-            }
-            // If "downloading", just loop again
-        } else {
-            break; // JNI Error
-        }
-    }
-}
-
-fn native_download_manager(url: &str, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
-    let mut env = vm.attach_current_thread()?;
-    let context_obj = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-
-    let url_jstr = env.new_string(url)?;
-    let fn_jstr = env.new_string(filename)?;
-
-    let uri_cls = env.find_class("android/net/Uri")?;
-    let uri = env
-        .call_static_method(
-            uri_cls,
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[JValue::Object(&url_jstr)],
-        )?
-        .l()?;
-
-    let req_cls = env.find_class("android/app/DownloadManager$Request")?;
-    let req = env.new_object(req_cls, "(Landroid/net/Uri;)V", &[JValue::Object(&uri)])?;
-
-    let mime = env.new_string("application/vnd.android.package-archive")?;
-    env.call_method(
-        &req,
-        "setMimeType",
-        "(Ljava/lang/String;)Landroid/app/DownloadManager$Request;",
-        &[JValue::Object(&mime)],
-    )?;
-    env.call_method(
-        &req,
-        "setNotificationVisibility",
-        "(I)Landroid/app/DownloadManager$Request;",
-        &[JValue::Int(1)],
-    )?;
-
-    let env_cls = env.find_class("android/os/Environment")?;
-    let dir_down = env
-        .get_static_field(env_cls, "DIRECTORY_DOWNLOADS", "Ljava/lang/String;")?
-        .l()?;
-    env.call_method(
-        &req,
-        "setDestinationInExternalPublicDir",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/app/DownloadManager$Request;",
-        &[JValue::Object(&dir_down), JValue::Object(&fn_jstr)],
-    )?;
-
-    let title = env.new_string("Manatan Update")?;
-    env.call_method(
-        &req,
-        "setTitle",
-        "(Ljava/lang/CharSequence;)Landroid/app/DownloadManager$Request;",
-        &[JValue::Object(&title)],
-    )?;
-
-    let dm_str = env.new_string("download")?;
-    let dm = env
-        .call_method(
-            &context_obj,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[JValue::Object(&dm_str)],
-        )?
-        .l()?;
-
-    let id = env
-        .call_method(
-            &dm,
-            "enqueue",
-            "(Landroid/app/DownloadManager$Request;)J",
-            &[JValue::Object(&req)],
-        )?
-        .j()?;
-
-    LAST_DOWNLOAD_ID.store(id, Ordering::Relaxed);
-
-    // --- START BACKGROUND MONITOR ---
-    thread::spawn(move || {
-        monitor_download_completion(id);
-    });
-
-    info!("✅ Download Enqueued ID: {}", id);
-    Ok(())
-}
-
-fn native_trigger_install() -> Result<(), Box<dyn std::error::Error>> {
-    let id = LAST_DOWNLOAD_ID.load(Ordering::Relaxed);
-    if id == -1 {
-        return Err("No active download".into());
-    }
-
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
-    let mut env = vm.attach_current_thread()?;
-    let context_obj = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-
-    let dm_str = env.new_string("download")?;
-    let dm = env
-        .call_method(
-            &context_obj,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[JValue::Object(&dm_str)],
-        )?
-        .l()?;
-
-    let uri = env
-        .call_method(
-            &dm,
-            "getUriForDownloadedFile",
-            "(J)Landroid/net/Uri;",
-            &[JValue::Long(id)],
-        )?
-        .l()?;
-    if uri.is_null() {
-        return Err("Download URI is null".into());
-    }
-
-    let intent_cls = env.find_class("android/content/Intent")?;
-    let action_view = env
-        .get_static_field(&intent_cls, "ACTION_VIEW", "Ljava/lang/String;")?
-        .l()?;
-    let intent = env.new_object(
-        &intent_cls,
-        "(Ljava/lang/String;)V",
-        &[JValue::Object(&action_view)],
-    )?;
-
-    let mime = env.new_string("application/vnd.android.package-archive")?;
-    env.call_method(
-        &intent,
-        "setDataAndType",
-        "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;",
-        &[JValue::Object(&uri), JValue::Object(&mime)],
-    )?;
-
-    env.call_method(
-        &intent,
-        "addFlags",
-        "(I)Landroid/content/Intent;",
-        &[JValue::Int(1 | 268435456)],
-    )?;
-
-    env.call_method(
-        &context_obj,
-        "startActivity",
-        "(Landroid/content/Intent;)V",
-        &[JValue::Object(&intent)],
-    )?;
-
-    info!("✅ Install Intent Started");
-    Ok(())
-}
-
-fn read_suwayomi_cookies(tachidesk_data_dir: &Path) -> String {
-    let cookie_path = tachidesk_data_dir.join("settings/cookie_store.xml");
-
-    // Fail silently with empty array if file doesn't exist
-    let content = match fs::read_to_string(&cookie_path) {
-        Ok(c) => c,
-        Err(_) => return "[]".to_string(),
-    };
-
-    let mut cookies = Vec::new();
-
-    // Naive XML Parsing for <entry key="domain.index">NAME=VALUE...</entry>
-    for line in content.lines() {
-        let line = line.trim();
-        if !line.starts_with("<entry key=\"") {
-            continue;
-        }
-
-        // Extract Key
-        let key_start = 12;
-        let Some(key_end) = line[key_start..].find('"') else {
-            continue;
-        };
-        let key = &line[key_start..key_start + key_end];
-
-        // Skip metadata keys (e.g. "google.com.size")
-        if key.ends_with(".size") {
-            continue;
-        }
-
-        // Extract Value (between "> and </entry>)
-        let Some(val_start_marker) = line.find("\">") else {
-            continue;
-        };
-        let val_start = val_start_marker + 2;
-        let Some(val_end) = line[val_start..].find("</entry>") else {
-            continue;
-        };
-        let full_value = &line[val_start..val_start + val_end];
-
-        // Parse Cookie String: "NAME=VALUE; expires=...; ..."
-        let parts: Vec<&str> = full_value.split(';').collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let main_pair = parts[0].trim();
-        // Fixed: changed main_part to main_pair
-        let Some(eq_idx) = main_pair.find('=') else {
-            continue;
-        };
-        let name = &main_pair[..eq_idx];
-        let value = &main_pair[eq_idx + 1..];
-
-        // Infer Domain from Key (remove last .index)
-        // Key: "barmanonymity.shop.0" -> "barmanonymity.shop"
-        let domain = if let Some(dot_idx) = key.rfind('.') {
-            &key[..dot_idx]
-        } else {
-            key
-        };
-
-        cookies.push(json!({
-            "name": name,
-            "value": value,
-            "domain": domain,
-            "path": "/",
-            "secure": full_value.contains("secure"),
-            "httpOnly": full_value.contains("HttpOnly")
-        }));
-    }
-
-    serde_json::to_string(&cookies).unwrap_or("[]".to_string())
-}
-
-fn launch_native_webview_with_cookies(target_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
-    let mut env = vm.attach_current_thread()?;
-    let context_obj = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-
-    // 1. Get data dir to find cookies
-    let internal_files_dir = get_files_dir_from_context(&mut env, &context_obj)
-        .ok_or("Failed to resolve internal files dir")?;
-    let external_files_dir = get_external_files_dir_from_context(&mut env, &context_obj);
-
-    let storage_root = get_external_storage_root_from_env(&mut env);
-    let shared_manatan = storage_root.as_ref().map(|p| p.join("Manatan"));
-    let shared_legacy = storage_root.as_ref().map(|p| p.join("Mangatan"));
-    let shared_base = if shared_manatan.as_ref().map(|p| p.exists()).unwrap_or(false) {
-        shared_manatan
-    } else if shared_legacy.as_ref().map(|p| p.exists()).unwrap_or(false) {
-        shared_legacy
-    } else {
-        shared_manatan
-    };
-    let tachidesk_data_dir =
-        resolve_tachidesk_data_dir_from_paths(&internal_files_dir, external_files_dir, shared_base);
-
-    // 2. Parse Cookies
-    let cookies_json = read_suwayomi_cookies(&tachidesk_data_dir);
-
-    // 3. Launch Activity
-    let pkg_name = "com.mangatan.app";
-    let cls_name = "com.mangatan.app.WebviewActivity";
-
-    let intent_cls = env.find_class("android/content/Intent")?;
-    let intent = env.new_object(intent_cls, "()V", &[])?;
-
-    let pkg_j = env.new_string(pkg_name)?;
-    let cls_j = env.new_string(cls_name)?;
-
-    env.call_method(
-        &intent,
-        "setClassName",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
-        &[(&pkg_j).into(), (&cls_j).into()],
-    )?;
-
-    // Extras
-    let url_key = env.new_string("TARGET_URL")?;
-    let url_val = env.new_string(target_url)?;
-    env.call_method(
-        &intent,
-        "putExtra",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
-        &[(&url_key).into(), (&url_val).into()],
-    )?;
-
-    let cookie_key = env.new_string("INITIAL_COOKIES")?;
-    let cookie_val = env.new_string(&cookies_json)?;
-    env.call_method(
-        &intent,
-        "putExtra",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
-        &[(&cookie_key).into(), (&cookie_val).into()],
-    )?;
-
-    env.call_method(
-        &intent,
-        "addFlags",
-        "(I)Landroid/content/Intent;",
-        &[268435456.into()],
-    )?; // FLAG_ACTIVITY_NEW_TASK
-
-    env.call_method(
-        &context_obj,
-        "startActivity",
-        "(Landroid/content/Intent;)V",
-        &[(&intent).into()],
-    )?;
-
-    Ok(())
-}
-
-#[derive(Deserialize)]
-struct WebviewLaunchRequest {
-    url: String,
-}
-
-async fn webview_shim_handler() -> impl IntoResponse {
-    info!("⚡ Shim Handler Hit");
-
-    // We use a standard string with \" escapes to ensure the JS string doesn't break if formatted.
-    let html = "
-    <!DOCTYPE html>
-    <html lang=\"en\">
-    <head>
-        <meta charset=\"UTF-8\">
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-        <title>Opening App...</title>
-        <style>
-            body { background-color: #121212; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; padding: 20px; text-align: center; }
-            a { color: #4dabf7; text-decoration: none; border: 1px solid #4dabf7; padding: 10px 20px; border-radius: 5px; margin-top: 20px; display: inline-block;}
-            .debug { color: #555; font-size: 0.8rem; margin-top: 20px; word-break: break-all; }
-        </style>
-    </head>
-    <body>
-        <p id=\"status\">Opening App...</p>
-        <a id=\"link\" href=\"#\" style=\"display:none\">Click Manual Open</a>
-        <div id=\"debug\" class=\"debug\"></div>
-        
-        <script>
-            try {
-                var target = window.location.hash.substring(1);
-                
-                if (target) {
-                    // Split the long string to prevent 'Unexpected End of Input' if lines wrap
-                    var part1 = \"intent://launch?url=\" + encodeURIComponent(target);
-                    var part2 = \"#Intent;scheme=manatan;package=com.mangatan.app;\";
-                    var part3 = \"category=android.intent.category.BROWSABLE;end\";
-                    
-                    var intentUrl = part1 + part2 + part3;
-                    
-                    document.getElementById('debug').innerText = \"Target: \" + target;
-                    
-                    // Attempt redirect
-                    window.location.replace(intentUrl);
-                    
-                    // Setup manual link
-                    var link = document.getElementById('link');
-                    link.href = intentUrl;
-                    
-                    setTimeout(function() {
-                        link.style.display = 'block';
-                        document.getElementById('status').innerText = \"Tap below to switch to app:\";
-                    }, 1000);
-                } else {
-                    document.getElementById('status').innerText = \"Error: No URL found in hash.\";
-                }
-            } catch (e) {
-                alert(\"JS Error: \" + e.message);
-            }
-        </script>
-    </body>
-    </html>
-    ";
-
-    ([(axum::http::header::CONTENT_TYPE, "text/html")], html)
 }
 
 fn update_server_conf_local_source(app: &AndroidApp, files_dir: &Path) {
@@ -2898,34 +2165,15 @@ fn update_server_conf_local_source(app: &AndroidApp, files_dir: &Path) {
     let mut new_lines = Vec::new();
     let mut patched = false;
 
-    let legacy_sources_dir = shared_root
-        .parent()
-        .map(|p| p.join("Mangatan").join("local-sources"));
-    let legacy_anime_dir = shared_root
-        .parent()
-        .map(|p| p.join("Mangatan").join("local-anime"));
-
     let desired_sources = local_sources_dir.to_string_lossy().to_string();
     let desired_anime = shared_root
-        .join("local-anime")
+        .join(".backend-compat-unused")
         .to_string_lossy()
         .to_string();
-    let legacy_sources = legacy_sources_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
-    let legacy_anime = legacy_anime_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
 
     for line in content.lines() {
         if line.trim().starts_with("server.localSourcePath =") {
-            let should_patch = if is_fresh_install {
-                true
-            } else if let Some(legacy_sources) = legacy_sources.as_ref() {
-                line.contains(legacy_sources) || line.contains("/Mangatan/")
-            } else {
-                line.contains("/Mangatan/")
-            };
+            let should_patch = is_fresh_install;
 
             if should_patch {
                 new_lines.push(format!(
@@ -2937,13 +2185,7 @@ fn update_server_conf_local_source(app: &AndroidApp, files_dir: &Path) {
                 new_lines.push(line.to_string());
             }
         } else if line.trim().starts_with("server.localAnimeSourcePath =") {
-            let should_patch = if is_fresh_install {
-                true
-            } else if let Some(legacy_anime) = legacy_anime.as_ref() {
-                line.contains(legacy_anime) || line.contains("/Mangatan/")
-            } else {
-                line.contains("/Mangatan/")
-            };
+            let should_patch = is_fresh_install;
 
             if should_patch {
                 new_lines.push(format!(

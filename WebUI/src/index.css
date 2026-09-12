@@ -55,6 +55,22 @@ html.ocr-reader-mode body {
 /* --- OVERLAYS --- */
 .ocr-overlay-container { pointer-events: none; z-index: 99999; }
 
+/* A pinch/zoom immediately dismisses lookup UI. Hide the portal overlays during
+   the gesture as well so React cannot leave a one-frame stale box over the page. */
+html.ocr-zoom-gesture-active .ocr-overlay-wrapper,
+html.ocr-zoom-gesture-active #ocr-overlay-layer,
+html.ocr-zoom-gesture-active .dictionary-highlight-overlay,
+html.ocr-zoom-gesture-active .yomitan-popup {
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+/* OCR hit targets are available only after scroll/pan momentum has settled.
+   This prevents a drag beginning on a text region from reactivating it. */
+html.ocr-reader-motion-active .gemini-ocr-text-box {
+    pointer-events: none !important;
+}
+
 /* --- TEXT BOX CARD STYLING --- */
 .gemini-ocr-text-box {
     position: absolute;
@@ -168,6 +184,24 @@ html.ocr-reader-mode body {
 
 .gemini-ocr-text-box.editing::-webkit-scrollbar { display: none; }
 .gemini-ocr-text-box.merge-target { outline: 3px solid #f1c40f; z-index: 100000; opacity: 1 !important; }
+
+/* Experimental raw-art lookup: retain the OCR hit geometry without painting replacement text. */
+.gemini-ocr-text-box.boxless,
+.gemini-ocr-text-box.boxless:hover,
+.gemini-ocr-text-box.boxless.mobile-active,
+.gemini-ocr-text-box.boxless.active-lookup {
+    color: transparent !important;
+    background: transparent !important;
+    border: 0 !important;
+    outline: 0 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+}
+
+@keyframes lookup-popup-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
 
 /* SOLO MODE LOGIC */
 .ocr-overlay-container.solo-mode .gemini-ocr-text-box { opacity: 0; }

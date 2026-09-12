@@ -1,4 +1,4 @@
-package com.mangatan.app;
+package dev.local.mangareader;
 
 import android.content.ContentValues;
 import android.content.Context;
@@ -27,6 +27,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -48,6 +49,20 @@ public class AnkiBridge {
     private static volatile boolean serverRunning = false;
     private static ServerSocket serverSocket;
     private static final ExecutorService EXEC = Executors.newFixedThreadPool(4);
+    private static final String TOKEN_PREFS = "manga_reader_anki_bridge";
+    private static final String TOKEN_KEY = "token";
+
+    public static synchronized String getBridgeToken(Context context) {
+        android.content.SharedPreferences preferences = context.getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+        String token = preferences.getString(TOKEN_KEY, null);
+        if (token == null) {
+            byte[] bytes = new byte[32];
+            new SecureRandom().nextBytes(bytes);
+            token = Base64.encodeToString(bytes, Base64.NO_WRAP | Base64.URL_SAFE);
+            preferences.edit().putString(TOKEN_KEY, token).apply();
+        }
+        return token;
+    }
 
     // API Constants
     private static final String AUTHORITY = "com.ichi2.anki.flashcards";
@@ -94,10 +109,10 @@ public class AnkiBridge {
 
         new Thread(() -> {
             try {
-                // Bind to 0.0.0.0 to allow connections from any IP
+                // This compatibility bridge is app-private and never exposed to the LAN.
                 serverSocket = new ServerSocket();
-                serverSocket.bind(new InetSocketAddress("0.0.0.0", 8765));
-                Log.i(TAG, "✅ AnkiConnect listening on 0.0.0.0:8765");
+                serverSocket.bind(new InetSocketAddress("127.0.0.1", 18765));
+                Log.i(TAG, "Anki bridge listening on loopback:18765");
 
                 while (serverRunning) {
                     try {
@@ -232,6 +247,10 @@ public class AnkiBridge {
                 writeResponse(rawOut, 405, error("Method not allowed"), true);
                 return;
             }
+            if (!getBridgeToken(appContext).equals(hdrs.get("x-manga-reader-bridge"))) {
+                writeResponse(rawOut, 403, error("Forbidden"), true);
+                return;
+            }
 
             // Sanity checks on Content-Length
             if (contentLength < 0) {
@@ -292,9 +311,9 @@ public class AnkiBridge {
         h.append("Content-Type: application/json; charset=utf-8\r\n");
 
         if (cors) {
-            h.append("Access-Control-Allow-Origin: *\r\n");
-            h.append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
-            h.append("Access-Control-Allow-Headers: *\r\n"); // Allow all headers
+            h.append("Access-Control-Allow-Origin: http://127.0.0.1:14568\r\n");
+            h.append("Access-Control-Allow-Methods: POST, OPTIONS\r\n");
+            h.append("Access-Control-Allow-Headers: Content-Type, X-Manga-Reader-Bridge\r\n");
             h.append("Access-Control-Allow-Private-Network: true\r\n");
         }
 
@@ -538,7 +557,8 @@ public class AnkiBridge {
     }
 
     private static String findDeckName(Context ctx, long deckId) {
-        try (Cursor c = ctx.getContentResolver().query(DECKS_URI, new String[]{DECK_NAME}, DECK_ID + "=?", new String[]{String.valueOf(deckId)}, null)) {
+        Uri deckUri = Uri.withAppendedPath(DECKS_URI, String.valueOf(deckId));
+        try (Cursor c = ctx.getContentResolver().query(deckUri, new String[]{DECK_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) return c.getString(0);
         } catch (Exception e) {
             Log.e(TAG, "findDeckName", e);
@@ -603,7 +623,7 @@ public class AnkiBridge {
         }
 
         Set<String> tags = new HashSet<>();
-        tags.add("Manatan");
+        tags.add("manga-reader-fork");
         JSONArray tagArr = note.optJSONArray("tags");
         if (tagArr != null) for (int i = 0; i < tagArr.length(); i++) tags.add(tagArr.getString(i));
 
@@ -720,7 +740,8 @@ public class AnkiBridge {
     }
 
     private static String findModelName(Context ctx, long modelId) {
-        try (Cursor c = ctx.getContentResolver().query(MODELS_URI, new String[]{MODEL_NAME}, MODEL_ID + "=?", new String[]{String.valueOf(modelId)}, null)) {
+        Uri modelUri = Uri.withAppendedPath(MODELS_URI, String.valueOf(modelId));
+        try (Cursor c = ctx.getContentResolver().query(modelUri, new String[]{MODEL_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) return c.getString(0);
         } catch (Exception e) {
             Log.e(TAG, "findModelName", e);
@@ -737,8 +758,10 @@ public class AnkiBridge {
         for (int i = 0; i < notes.length(); i++) {
             JSONObject note = notes.getJSONObject(i);
             JSONObject fields = note.getJSONObject("fields");
-            String firstKey = fields.keys().next();
-            checksums.add(fieldChecksum(fields.getString(firstKey)));
+            long modelId = findModelId(ctx, note.getString("modelName"));
+            String[] modelFields = getModelFields(ctx, modelId);
+            if (modelFields.length == 0) throw new Exception("The selected note type has no fields");
+            checksums.add(fieldChecksum(fields.optString(modelFields[0], "")));
         }
 
         String in = TextUtils.join(",", checksums);
@@ -827,7 +850,7 @@ public class AnkiBridge {
             conn.setConnectTimeout(30000);
             conn.setReadTimeout(30000);
             conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty("User-Agent", "Manatan/1.0");
+            conn.setRequestProperty("User-Agent", "MangaReaderFork/0.1");
             
             if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
                 throw new Exception("HTTP " + conn.getResponseCode());
@@ -876,7 +899,7 @@ public class AnkiBridge {
             else if (lowerName.endsWith(".ogg")) values.put(MediaStore.MediaColumns.MIME_TYPE, "audio/ogg");
             else values.put(MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg");
 
-            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Manatan");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/MangaReaderFork");
             collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
         } else {
             if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
@@ -884,7 +907,7 @@ public class AnkiBridge {
             else if (lowerName.endsWith(".webp")) values.put(MediaStore.MediaColumns.MIME_TYPE, "image/webp");
             else values.put(MediaStore.MediaColumns.MIME_TYPE, "image/png");
 
-            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Manatan");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MangaReaderFork");
             collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         }
 

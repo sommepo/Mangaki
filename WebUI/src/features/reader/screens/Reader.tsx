@@ -42,12 +42,14 @@ import {
 } from '@/features/reader/stores/ReaderStore.ts';
 
 import { ReaderAutoScroll } from '@/features/reader/auto-scroll/ReaderAutoScroll.tsx';
-import { ReaderZoomProvider } from '../zoom/ReaderZoomContext';
+import { ForkReaderPageScrubber } from '@/features/fork/ForkReaderPageScrubber.tsx';
+import { ReaderZoomProvider } from '@/features/reader/zoom/ReaderZoomContext.tsx';
 
 const BaseReader = ({
     setOverride,
     readerNavBarWidth,
-}: Pick<NavbarContextType, 'setOverride' | 'readerNavBarWidth'>) => {
+    forkMode = false,
+}: Pick<NavbarContextType, 'setOverride' | 'readerNavBarWidth'> & { forkMode?: boolean }) => {
     const { t } = useTranslation();
     const manga = useReaderStore((state) => state.manga);
     const { mangaChapters, initialChapter, chapterForDuplicatesHandling, currentChapter } = useReaderChaptersStore(
@@ -85,12 +87,18 @@ const BaseReader = ({
 
     const [areSettingsSet, setAreSettingsSet] = useState(false);
 
-    const { chapterSourceOrder: paramChapterSourceOrder, mangaId: paramMangaId } = useParams<{
+    const {
+        chapterSourceOrder: paramChapterSourceOrder,
+        mangaId: paramMangaId,
+        volumeId,
+    } = useParams<{
         chapterSourceOrder: string;
         mangaId: string;
+        volumeId: string;
     }>();
-    const chapterSourceOrder = Number(paramChapterSourceOrder);
-    const mangaId = Number(paramMangaId);
+    const chapterSourceOrder = forkMode ? 1 : Number(paramChapterSourceOrder);
+    const initialChapterId = forkMode && volumeId ? requestManager.getForkReaderChapterId(volumeId) : undefined;
+    const mangaId: number | string = forkMode ? requestManager.getForkReaderId(volumeId ?? '') : Number(paramMangaId);
 
     const mangaResponse = requestManager.useGetMangaReader(mangaId);
     const chaptersResponse = requestManager.useGetReaderChapters(mangaId);
@@ -119,6 +127,19 @@ const BaseReader = ({
     useEffect(() => {
         getReaderStore().setManga(mangaResponse.data?.manga);
     }, [mangaResponse.data?.manga]);
+
+    useEffect(() => {
+        if (!forkMode) return undefined;
+        const sourceId = `${mangaResponse.data?.manga?.sourceId ?? ''}`;
+        const seriesId = sourceId.startsWith('fork:') ? sourceId.slice('fork:'.length) : '';
+        if (!seriesId) return undefined;
+        sessionStorage.setItem('manga_reader_active_series_id', seriesId);
+        return () => {
+            if (sessionStorage.getItem('manga_reader_active_series_id') === seriesId) {
+                sessionStorage.removeItem('manga_reader_active_series_id');
+            }
+        };
+    }, [forkMode, mangaResponse.data?.manga?.sourceId]);
 
     useReaderResetStates();
     useReaderSetSettingsState(
@@ -150,6 +171,7 @@ const BaseReader = ({
         shouldSkipDupChapters,
         shouldSkipFilteredChapters,
         chapterListOptions,
+        initialChapterId,
     );
 
     useLayoutEffect(() => {
@@ -177,7 +199,7 @@ const BaseReader = ({
         });
 
         return () => setOverride({ status: false, value: null });
-    }, [scrollElementRef.current]);
+    }, [scrollElementRef.current, forkMode]);
 
     if (error) {
         return (
@@ -245,6 +267,7 @@ const BaseReader = ({
                 }}
             >
                 <ReaderViewer ref={scrollElementRef} />
+                {forkMode && <ForkReaderPageScrubber />}
                 <TapZoneLayout />
                 <ReaderRGBAFilter />
                 <ReaderAutoScroll />

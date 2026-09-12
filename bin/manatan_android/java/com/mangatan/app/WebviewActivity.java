@@ -1,4 +1,4 @@
-package com.mangatan.app;
+package dev.local.mangareader;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
@@ -10,7 +10,6 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -18,78 +17,83 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.PixelCopy;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.Window;
 import android.view.inputmethod.InputMethodManager;
-import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.ConsoleMessage;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 import android.util.Base64;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 public class WebviewActivity extends Activity {
+    private static volatile boolean visible;
     private WebView myWebView;
-    private String targetUrl = "http://127.0.0.1:4568";
+    private OnBackInvokedCallback backInvokedCallback;
+    private int localLoadRetryCount = 0;
+    private boolean runtimeRecoveryStarted = false;
+    private long lastBackNavigationAt = 0L;
+    private String targetUrl = "http://127.0.0.1:14568";
     
     // Flags
-    private boolean isShimLaunch = false; 
-    private String lastSyncedCookie = ""; 
     private ValueCallback<Uri[]> uploadMessage;
     public final static int FILECHOOSER_RESULTCODE = 100;
     public final static int SAVEFILE_RESULTCODE = 101;
+    public final static int FOLDER_PICKER_RESULTCODE = 102;
     private static final int ANKI_PERMISSION_REQUEST = 999;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 1000;
     private String pendingExportFilename;
     private String pendingExportMimeType;
     private String pendingExportContent;
+    private String pendingFolderCallbackId;
+
+    public static boolean isVisible() {
+        return visible;
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        if (checkSelfPermission("com.ichi2.anki.permission.READ_WRITE_DATABASE") 
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"com.ichi2.anki.permission.READ_WRITE_DATABASE"}, ANKI_PERMISSION_REQUEST);
-        }
 
         Intent intent = getIntent();
         if (intent.hasExtra("TARGET_URL")) {
             targetUrl = intent.getStringExtra("TARGET_URL");
         }
         
-        isShimLaunch = intent.getBooleanExtra("FROM_SHIM", false);
-        String initialCookiesJson = intent.getStringExtra("INITIAL_COOKIES");
+        if (!isForkLocalUrl(Uri.parse(targetUrl))) {
+            Log.w("MangaReader", "Rejected non-local privileged WebView target");
+            targetUrl = "http://127.0.0.1:14568";
+        }
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        );
+        setImmersiveMode(false);
 
         FrameLayout layout = new FrameLayout(this);
         layout.setLayoutParams(new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         myWebView = new WebView(this);
+        myWebView.setBackgroundColor(Color.BLACK);
         layout.addView(myWebView, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         // Close Button
-        if (!targetUrl.contains(":4568")) {
+        if (!targetUrl.contains(":14568")) {
             Button exitBtn = new Button(this);
             exitBtn.setText("CLOSE");
             exitBtn.setBackgroundColor(Color.RED);
@@ -107,18 +111,11 @@ public class WebviewActivity extends Activity {
         WebSettings webSettings = myWebView.getSettings();
         webSettings.setJavaScriptEnabled(true);
         webSettings.setDomStorageEnabled(true);
-        webSettings.setAllowFileAccess(true);
+        webSettings.setAllowFileAccess(false);
+        webSettings.setAllowContentAccess(true);
         
-        CookieManager cookieManager = CookieManager.getInstance();
-        cookieManager.setAcceptCookie(true);
-        cookieManager.setAcceptThirdPartyCookies(myWebView, true);
-
-        if (initialCookiesJson != null && !initialCookiesJson.isEmpty()) {
-            injectCookies(cookieManager, initialCookiesJson);
-        }
-
         String userAgent = webSettings.getUserAgentString();
-        webSettings.setUserAgentString(userAgent + " MangatanNative ManatanNative");
+        webSettings.setUserAgentString(userAgent + " MangaReaderForkNative ManatanNative");
 
         myWebView.setWebViewClient(new WebViewClient() {
             @Override
@@ -132,8 +129,7 @@ public class WebviewActivity extends Activity {
                         Intent intent = Intent.parseUri(urlString, Intent.URI_INTENT_SCHEME);
                         Uri deepLink = intent.getData();
                         if (deepLink != null
-                                && ("mangatan".equals(deepLink.getScheme())
-                                || "manatan".equals(deepLink.getScheme()))) {
+                                && "mangareaderfork".equals(deepLink.getScheme())) {
                             String actualUrl = deepLink.getQueryParameter("url");
                             if (actualUrl != null) {
                                 launchReader(actualUrl);
@@ -156,18 +152,77 @@ public class WebviewActivity extends Activity {
                     }
                 }
 
-                return false; 
+                if (isForkLocalUrl(uri)) {
+                    return false;
+                }
+
+                // Keep untrusted remote pages outside the privileged WebView that owns
+                // the Android bridge. Source protocols are handled by native clients.
+                try {
+                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+                    browserIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+                    startActivity(browserIntent);
+                } catch (Exception error) {
+                    Log.e("MangaReader", "Could not open external link", error);
+                }
+                return true;
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                Log.i("MangaReader", "WebView loaded " + url);
                 // MODIFIED: No sync here. 
                 // This prevents the toast from appearing when the webview first opens.
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                Log.e("MangaReader", "WebView request failed: " + request.getUrl() + " — " + error.getDescription());
+                if (request.isForMainFrame() && isForkLocalUrl(request.getUrl())) {
+                    localLoadRetryCount += 1;
+                    if (!MangatanActivity.isRuntimeHostAlive() || localLoadRetryCount >= 8) {
+                        requestRuntimeRecovery();
+                        return;
+                    }
+                    view.loadDataWithBaseURL(
+                            targetUrl,
+                            "<html><body style='margin:0;background:#090909;color:#ddd;font:16px sans-serif;display:grid;place-items:center;height:100vh'>Loading your library…</body></html>",
+                            "text/html",
+                            "UTF-8",
+                            null);
+                    new Handler(Looper.getMainLooper()).postDelayed(
+                            () -> {
+                                if (!isFinishing() && myWebView != null) myWebView.loadUrl(targetUrl);
+                            },
+                            Math.min(4000, 500L * localLoadRetryCount));
+                }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                String currentUrl = view.getUrl();
+                String recoveryUrl = isForkLocalUrl(Uri.parse(currentUrl == null ? "" : currentUrl))
+                        ? currentUrl
+                        : targetUrl;
+                Log.e("MangaReader", "WebView renderer exited; rebuilding reader surface");
+                destroyWebView(view);
+                Intent recoveryIntent = new Intent(WebviewActivity.this, WebviewActivity.class);
+                recoveryIntent.putExtra("TARGET_URL", recoveryUrl);
+                recoveryIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                finish();
+                startActivity(recoveryIntent);
+                return true;
             }
         });
 
         myWebView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage message) {
+                Log.e("MangaReaderConsole", message.messageLevel() + " " + message.sourceId() + ":" + message.lineNumber() + " " + message.message());
+                return true;
+            }
+
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, WebChromeClient.FileChooserParams fileChooserParams) {
                 if (uploadMessage != null) {
@@ -186,9 +241,18 @@ public class WebviewActivity extends Activity {
             }
         });
 
-        myWebView.addJavascriptInterface(new NativeCaptureBridge(), "ManatanNative");
+        NativeCaptureBridge nativeBridge = new NativeCaptureBridge();
+        myWebView.addJavascriptInterface(nativeBridge, "ManatanNative");
+        myWebView.addJavascriptInterface(nativeBridge, "MangaReaderNative");
 
         myWebView.loadUrl(targetUrl);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backInvokedCallback = this::handleBackNavigation;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    backInvokedCallback);
+        }
     }
 
     private void sendCaptureCallback(String callbackId, String dataUrl) {
@@ -227,6 +291,59 @@ public class WebviewActivity extends Activity {
     }
 
     private class NativeCaptureBridge {
+        @JavascriptInterface
+        public String getAnkiBridgeToken() {
+            return AnkiBridge.getBridgeToken(getApplicationContext());
+        }
+
+        @JavascriptInterface
+        public void requestAnkiPermission() {
+            runOnUiThread(() -> {
+                if (checkSelfPermission("com.ichi2.anki.permission.READ_WRITE_DATABASE")
+                        != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"com.ichi2.anki.permission.READ_WRITE_DATABASE"}, ANKI_PERMISSION_REQUEST);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setImmersive(final boolean enabled) {
+            runOnUiThread(() -> setImmersiveMode(enabled));
+        }
+
+        @JavascriptInterface
+        public void updateBackgroundJobs(final boolean active, final String title, final int completed, final int total) {
+            runOnUiThread(() -> {
+                if (!active) {
+                    JobForegroundService.stop(getApplicationContext());
+                    return;
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                        && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(
+                            new String[]{"android.permission.POST_NOTIFICATIONS"},
+                            NOTIFICATION_PERMISSION_REQUEST);
+                }
+                try {
+                    JobForegroundService.update(getApplicationContext(), title, completed, total);
+                } catch (Exception error) {
+                    Log.e("MangaReader", "Could not start background-job notification", error);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void pickFolder(final String callbackId) {
+            runOnUiThread(() -> {
+                pendingFolderCallbackId = callbackId;
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                startActivityForResult(intent, FOLDER_PICKER_RESULTCODE);
+            });
+        }
+
         @JavascriptInterface
         public void openExternalUrl(final String url) {
             if (url == null || url.isEmpty()) return;
@@ -345,10 +462,31 @@ public class WebviewActivity extends Activity {
                     startActivityForResult(intent, SAVEFILE_RESULTCODE);
                 } catch (Exception e) {
                     Log.e("Manatan", "Failed to launch save dialog", e);
-                    fallbackSaveToDownloads(filename, content);
+                    clearPendingExport();
+                    Toast.makeText(WebviewActivity.this, "No document provider is available", Toast.LENGTH_SHORT).show();
                 }
             });
         }
+    }
+
+    private void setImmersiveMode(boolean enabled) {
+        int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+        if (enabled) {
+            flags |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+        }
+        getWindow().getDecorView().setSystemUiVisibility(flags);
+    }
+
+    private void sendFolderCallback(String callbackId, String uri) {
+        if (myWebView == null || callbackId == null) return;
+        String script = "window.mangaReaderFolderPicked && window.mangaReaderFolderPicked("
+                + JSONObject.quote(callbackId) + ","
+                + (uri == null ? "null" : JSONObject.quote(uri)) + ");";
+        myWebView.evaluateJavascript(script, null);
     }
 
     private String normalizeExportMimeType(String mimeType) {
@@ -364,20 +502,12 @@ public class WebviewActivity extends Activity {
         return mimeType;
     }
 
-    private void fallbackSaveToDownloads(String filename, String content) {
-        try {
-            File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-            File file = new File(downloadsDir, filename);
-            try (FileOutputStream fos = new FileOutputStream(file)) {
-                fos.write(content.getBytes(StandardCharsets.UTF_8));
-            }
-            Toast.makeText(WebviewActivity.this, "Saved to Downloads/" + filename, Toast.LENGTH_SHORT).show();
-        } catch (Exception saveError) {
-            Log.e("Manatan", "Failed to save file", saveError);
-            Toast.makeText(WebviewActivity.this, "Failed to save file", Toast.LENGTH_SHORT).show();
-        } finally {
-            clearPendingExport();
-        }
+    private boolean isForkLocalUrl(Uri uri) {
+        if (uri == null || !"http".equals(uri.getScheme())) return false;
+        String host = uri.getHost();
+        int port = uri.getPort();
+        return ("127.0.0.1".equals(host) || "localhost".equals(host))
+                && (port == 14568 || port == 18765);
     }
 
     private void clearPendingExport() {
@@ -394,139 +524,135 @@ public class WebviewActivity extends Activity {
     }
 
     private void handleSmartClose() {
-        if (isShimLaunch) {
-            Log.i("Manatan", "Closing Shim View -> Minimizing App");
-            moveTaskToBack(true);
-            finish(); 
-        } else {
-            Log.i("Manatan", "Closing Native View -> Returning to Library");
-            finish();
+        moveTaskToBack(true);
+    }
+
+    private void requestRuntimeRecovery() {
+        if (runtimeRecoveryStarted || isFinishing()) return;
+        runtimeRecoveryStarted = true;
+
+        String recoveryUrl = targetUrl;
+        if (myWebView != null) {
+            String currentUrl = myWebView.getUrl();
+            if (currentUrl != null && isForkLocalUrl(Uri.parse(currentUrl))) {
+                recoveryUrl = currentUrl;
+            }
+        }
+        getSharedPreferences("runtime_recovery", MODE_PRIVATE)
+                .edit()
+                .putString("target_url", recoveryUrl)
+                .apply();
+
+        Log.w("MangaReader", "Embedded server unavailable; recreating runtime host");
+        Intent recoveryIntent = new Intent(this, MangatanActivity.class);
+        recoveryIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(recoveryIntent);
+    }
+
+    private void handleBackNavigation() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastBackNavigationAt < 750L) return;
+        lastBackNavigationAt = now;
+
+        if (myWebView == null) {
+            handleSmartClose();
+            return;
+        }
+        try {
+            myWebView.evaluateJavascript(
+                "(() => {"
+                    + "if (window.__handleNativeBack && window.__handleNativeBack()) return true;"
+                    + "if (window.location.pathname.startsWith('/fork/reader/')) {"
+                    + "window.location.assign('/library'); return true;"
+                    + "}"
+                    + "return false;"
+                    + "})()",
+                value -> {
+                    if ("true".equals(value)) return;
+                    if (myWebView.canGoBack()) myWebView.goBack();
+                    else handleSmartClose();
+                });
+        } catch (Exception error) {
+            if (myWebView.canGoBack()) myWebView.goBack();
+            else handleSmartClose();
         }
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            // Always try JS first. evaluateJavascript is async, so handle the fallback in the callback.
-            try {
-                myWebView.evaluateJavascript(
-                    "(window.__handleNativeBack && window.__handleNativeBack()) || false",
-                    value -> {
-                        final boolean handled = "true".equals(value);
-                        if (handled) {
-                            return;
-                        }
+    public void onBackPressed() {
+        handleBackNavigation();
+    }
 
-                        if (myWebView.canGoBack()) {
-                            myWebView.goBack();
-                        } else {
-                            handleSmartClose();
-                        }
-                    });
-                return true;
-            } catch (Exception e) {
-                // Fall through to native back behavior.
-            }
+    @Override
+    protected void onStart() {
+        super.onStart();
+        visible = true;
+    }
 
-            if (myWebView.canGoBack()) {
-                myWebView.goBack();
-                return true;
-            } else {
-                handleSmartClose();
-                return true;
-            }
+    @Override
+    protected void onResume() {
+        super.onResume();
+        visible = true;
+        if (!MangatanActivity.isRuntimeHostAlive()) {
+            requestRuntimeRecovery();
+            return;
         }
-        return super.onKeyDown(keyCode, event);
-    }
-
-    // --- Cookie Logic ---
-    private void syncCookiesToSuwayomi(boolean forceToast) {
-        if (myWebView == null) return;
-        String currentUrl = myWebView.getUrl();
-        if (currentUrl == null || currentUrl.isEmpty()) return;
-        if (currentUrl.contains("127.0.0.1") || currentUrl.contains("localhost")) return;
-
-        String cookieStr = CookieManager.getInstance().getCookie(currentUrl);
-        String userAgent = myWebView.getSettings().getUserAgentString();
-        if (cookieStr == null || cookieStr.isEmpty()) return;
-        if (!forceToast && cookieStr.equals(lastSyncedCookie)) return;
-        lastSyncedCookie = cookieStr;
-
-        new Thread(() -> {
-            try {
-                URL urlObj = new URL(currentUrl);
-                String domain = urlObj.getHost();
-                JSONObject payload = new JSONObject();
-                payload.put("userAgent", userAgent);
-                JSONArray cookies = new JSONArray();
-                String[] pairs = cookieStr.split(";");
-                for (String pair : pairs) {
-                    String[] parts = pair.trim().split("=", 2);
-                    if (parts.length == 2) {
-                        JSONObject c = new JSONObject();
-                        c.put("name", parts[0]);
-                        c.put("value", parts[1]);
-                        c.put("domain", domain);
-                        c.put("path", "/");
-                        c.put("secure", true);
-                        c.put("httpOnly", false);
-                        c.put("expiresAt", System.currentTimeMillis() + 31536000000L);
-                        cookies.put(c);
-                    }
-                }
-                payload.put("cookies", cookies);
-                URL api = new URL("http://127.0.0.1:4568/api/v1/cookie");
-                HttpURLConnection conn = (HttpURLConnection) api.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setConnectTimeout(5000);
-                conn.setDoOutput(true);
-                try (OutputStream os = conn.getOutputStream()) {
-                    byte[] input = payload.toString().getBytes(StandardCharsets.UTF_8);
-                    os.write(input, 0, input.length);
-                }
-                int code = conn.getResponseCode();
-                runOnUiThread(() -> {
-                    if (code >= 200 && code < 300) {
-                        Toast.makeText(WebviewActivity.this, "Cookies Synced", Toast.LENGTH_SHORT).show();
-                    } else if (forceToast) {
-                        Toast.makeText(WebviewActivity.this, "Cookie Sync Failed: " + code, Toast.LENGTH_SHORT).show();
-                    }
-                });
-                conn.disconnect();
-            } catch (Exception e) {
-                Log.e("ManatanCookie", "Sync Exception", e);
-            }
-        }).start();
-    }
-
-    private void injectCookies(CookieManager cm, String json) {
-        try {
-            JSONArray arr = new JSONArray(json);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject c = arr.getJSONObject(i);
-                String domain = c.optString("domain", "");
-                String name = c.getString("name");
-                String value = c.getString("value");
-                String cookieStr = name + "=" + value + "; domain=" + domain + "; path=/";
-                cm.setCookie(domain, cookieStr);
-            }
-            cm.flush();
-        } catch (Exception e) {
-            Log.e("ManatanCookie", "Injection failed", e);
+        if (myWebView != null) {
+            myWebView.onResume();
+            myWebView.resumeTimers();
         }
     }
 
     @Override
     protected void onPause() {
-        syncCookiesToSuwayomi(false); // Silent sync on pause/minimize
+        if (myWebView != null) {
+            myWebView.onPause();
+            myWebView.pauseTimers();
+        }
         super.onPause();
     }
-    
+
+    @Override
+    protected void onStop() {
+        visible = false;
+        super.onStop();
+    }
+
+    private void destroyWebView(WebView view) {
+        if (view == null) return;
+        try {
+            view.stopLoading();
+            view.onPause();
+            view.removeJavascriptInterface("ManatanNative");
+            view.removeJavascriptInterface("MangaReaderNative");
+            ViewParent parent = view.getParent();
+            if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(view);
+            view.removeAllViews();
+            view.destroy();
+        } catch (Exception error) {
+            Log.e("MangaReader", "Could not fully release WebView", error);
+        }
+        if (view == myWebView) myWebView = null;
+    }
+
     @Override
     protected void onDestroy() {
-        syncCookiesToSuwayomi(true); // Toast sync on close/destroy
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
+            backInvokedCallback = null;
+        }
+        visible = false;
+        destroyWebView(myWebView);
         super.onDestroy();
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            handleBackNavigation();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
     }
 
     @Override
@@ -558,6 +684,22 @@ public class WebviewActivity extends Activity {
                 Toast.makeText(this, "Failed to save file", Toast.LENGTH_SHORT).show();
             } finally {
                 clearPendingExport();
+            }
+        } else if (requestCode == FOLDER_PICKER_RESULTCODE) {
+            String callbackId = pendingFolderCallbackId;
+            pendingFolderCallbackId = null;
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                sendFolderCallback(callbackId, null);
+                return;
+            }
+            Uri uri = data.getData();
+            int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            try {
+                getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                sendFolderCallback(callbackId, uri.toString());
+            } catch (SecurityException error) {
+                Log.e("MangaReader", "Could not persist folder permission", error);
+                sendFolderCallback(callbackId, null);
             }
         } else {
             super.onActivityResult(requestCode, resultCode, data);

@@ -187,3 +187,11 @@ yarn-error.log*
 !.env.example
 
 ocr-test-data
+
+# Project-scoped host tools, credentials, signing keys, and generated deliverables
+.toolchains/
+.secrets/
+android-app/.gradle/
+deliverables/*.apk
+deliverables/*.idsig
+deliverables/device-*/

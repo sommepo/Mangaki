@@ -26,6 +26,14 @@ export const AppRoutes = {
         match: '/',
         path: '/',
     },
+    activity: {
+        match: 'activity',
+        path: '/activity',
+    },
+    stats: {
+        match: 'stats',
+        path: '/stats',
+    },
     matchAll: {
         match: '*',
     },

@@ -1,0 +1,30 @@
+[Unit]
+Description=Mangaki private manga OCR
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@REPO_ROOT@@
+ExecStart=@@PYTHON@@ @@REPO_ROOT@@/services/mangaki-ocr/server.py
+Environment=MANGAKI_OCR_BIND=@@BIND@@
+Environment=MANGAKI_OCR_PORT=7332
+Environment=MANGAKI_OCR_THREADS=3
+Environment=OMP_NUM_THREADS=3
+Environment=MKL_NUM_THREADS=3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=@@REPO_ROOT@@/.toolchains
+Restart=on-failure
+RestartSec=5
+Nice=10
+CPUQuota=300%
+MemoryHigh=4G
+MemoryMax=6G
+TasksMax=128
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

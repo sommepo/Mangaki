@@ -78,7 +78,9 @@ export class ReaderService {
     }
 
     static navigateToChapter(chapter: TChapterReader, state?: ReaderOpenChapterLocationState): void {
-        ReactRouter.navigate(Chapters.getReaderUrl(chapter), {
+        const forkVolumeId = requestManager.getForkReaderVolumeId(chapter.id);
+        const path = forkVolumeId ? `/fork/reader/${encodeURIComponent(forkVolumeId)}` : Chapters.getReaderUrl(chapter);
+        ReactRouter.navigate(path, {
             replace: true,
             state,
         });
@@ -348,6 +350,11 @@ export class ReaderService {
 
             if (!manga) {
                 navigate(AppRoutes.library.path());
+                return;
+            }
+
+            if (manga.sourceId?.startsWith('fork:')) {
+                navigate(`/fork/series/${encodeURIComponent(manga.sourceId.slice('fork:'.length))}`);
                 return;
             }
 

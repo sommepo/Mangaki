@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Manatan</title>
-    <meta name="apple-mobile-web-app-title" content="Manatan" />
+    <title>Mangaki</title>
+    <meta name="apple-mobile-web-app-title" content="Mangaki" />
     <meta
             name="description"
             content="A manga reader with instant ocr and optionally enabled native yomitan like popup dictionary that runs tachiyomi's extensions"
@@ -18,11 +18,14 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400&family=Noto+Serif+KR:wght@400&family=Noto+Serif+SC:wght@400&family=Noto+Serif+TC:wght@400&family=Noto+Sans+JP:wght@400&family=Noto+Sans+KR:wght@400&family=Noto+Sans+SC:wght@400&family=Noto+Sans+TC:wght@400&family=Shippori+Mincho:wght@400&family=Klee+One:wght@400;600&display=swap"
-        rel="stylesheet">
+    <script>
+        window.addEventListener('error', (event) => {
+            console.error('MangaReaderUncaught', event.error?.stack || event.message);
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+            console.error('MangaReaderUnhandledRejection', event.reason?.stack || event.reason);
+        });
+    </script>
     <!--
       manifest.json provides metadata used when your web app is installed on a
       user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/

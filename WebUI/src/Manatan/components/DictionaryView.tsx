@@ -33,6 +33,7 @@ import MenuBookIcon from '@mui/icons-material/MenuBook';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import AddIcon from '@mui/icons-material/Add';
 import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
+import CloseIcon from '@mui/icons-material/Close';
 import { CropperModal } from '@/Manatan/components/CropperModal';
 import { notesInfo, calculateUpdatedFields, updateNote } from '@/Manatan/utils/anki';
 
@@ -381,7 +382,7 @@ const AnkiButtons: React.FC<{
     const checkStatus = async () => {
         if (!settings.ankiConnectEnabled || !settings.ankiCheckDuplicates) return;
         try {
-            const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+            const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
             const scope = settings.ankiDuplicateScope || 'deck';
 
             const queryParts = [];
@@ -669,17 +670,6 @@ const AnkiButtons: React.FC<{
             }
         }
         for (const [ankiField, mapType] of Object.entries(map)) {
-            const mappedSentenceValue = mapSentenceFieldValue(
-                mapType,
-                sentence,
-                sentenceFurigana,
-                entry.headword,
-            );
-            if (mappedSentenceValue !== null) {
-                fields[ankiField] = mappedSentenceValue;
-                continue;
-            }
-
             if (mapType === 'Target Word') fields[ankiField] = entry.headword;
             else if (mapType === 'Word (Again)') fields[ankiField] = entry.headword;
             else if (mapType === 'Reading') fields[ankiField] = entry.reading;
@@ -722,7 +712,7 @@ const AnkiButtons: React.FC<{
     };
 
     const addNoteToAnki = async (croppedBase64?: string) => {
-        const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+        const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
         try {
             setStatus('loading');
             const { fields, pictureData, wordAudioData } = await prepareNoteData(croppedBase64);
@@ -758,7 +748,7 @@ const AnkiButtons: React.FC<{
 
     const handleOverwrite = async (croppedBase64?: string) => {
         if (!existingNoteId) return;
-        const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+        const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
         try {
             setStatus('loading');
             const { fields, pictureData, wordAudioData } = await prepareNoteData(croppedBase64);
@@ -796,7 +786,7 @@ const AnkiButtons: React.FC<{
     const handleOpen = async (e: React.MouseEvent) => {
         e.stopPropagation();
         try {
-            const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
+            const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
             let query = '';
             if (existingNoteId) {
                 query = `nid:${existingNoteId}`;
@@ -1153,10 +1143,11 @@ interface DictionaryViewProps {
     renderAnkiButtons?: (entry: DictionaryResult) => React.ReactNode;
     renderHistoryNav?: () => React.ReactNode;
     grouped?: boolean;
+    onDismiss?: () => void;
 }
 
 export const DictionaryView: React.FC<DictionaryViewProps> = ({ 
-    results, kanjiResults = [], isLoading, systemLoading, onLinkClick, onWordClick, onKanjiClick, context, variant = 'inline', popupTheme, layout = 'vertical', renderAnkiButtons, renderHistoryNav, grouped = false
+    results, kanjiResults = [], isLoading, systemLoading, onLinkClick, onWordClick, onKanjiClick, context, variant = 'inline', popupTheme, layout = 'vertical', renderAnkiButtons, renderHistoryNav, grouped = false, onDismiss
 }) => {
     const isPopup = variant === 'popup';
     const muiTheme = useTheme();
@@ -1319,11 +1310,11 @@ export const DictionaryView: React.FC<DictionaryViewProps> = ({
             )}
             {isLoading && <div style={{ textAlign: 'center', padding: '20px', color: colors.textMuted }}>Scanning...</div>}
             {!isLoading && processedEntries.map((entry, i) => (
-                <div key={i} className="entry" style={{ marginBottom: layout === 'horizontal' ? '8px' : '16px', paddingBottom: layout === 'horizontal' ? '8px' : '16px', borderBottom: i < processedEntries.length - 1 ? `1px solid ${colors.border}` : 'none' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                <div key={i} className="entry" style={{ marginBottom: isPopup ? '6px' : layout === 'horizontal' ? '8px' : '16px', paddingBottom: isPopup ? '6px' : layout === 'horizontal' ? '8px' : '16px', borderBottom: i < processedEntries.length - 1 ? `1px solid ${colors.border}` : 'none' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: isPopup ? '4px' : '8px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: layout === 'horizontal' ? '6px' : '0' }}>
                             {i === 0 && layout === 'horizontal' && renderHistoryNav && renderHistoryNav()}
-                            <div style={{ fontSize: layout === 'horizontal' ? '1.5rem' : '1.8em', lineHeight: '1', marginRight: layout === 'horizontal' ? '8px' : '10px', color: colors.text }} className="headword">
+                            <div style={{ fontSize: isPopup ? '21px' : layout === 'horizontal' ? '1.5rem' : '1.8em', lineHeight: 1.08, marginRight: layout === 'horizontal' ? '8px' : '10px', color: colors.text, fontWeight: isPopup ? 700 : undefined }} className="headword">
                                 {layout === 'horizontal' ? (
                                     <>
                                         <ClickableHeadwordText
@@ -1365,13 +1356,17 @@ export const DictionaryView: React.FC<DictionaryViewProps> = ({
                                 )}
                             </div>
                             {entry.termTags && entry.termTags.length > 0 && (
-                                <div style={{ display: 'flex', gap: '4px' }} className="headword-list-tag-list tag-list">
+                                <div style={{ display: 'flex', gap: isPopup ? '3px' : '4px' }} className="headword-list-tag-list tag-list">
                                     {entry.termTags.flatMap((tag: any) => {
                                         const label = (typeof tag === 'object' && tag !== null && tag.name) ? tag.name : tag;
                                         if (typeof label !== 'string') return [];
                                         return splitTagString(label);
                                     }).map((label, idx) => (
-                                        <span key={idx} className="tag" style={getTagStyle(layout, colors.tagBg, colors.tagText)}><span className="tag-label">{label}</span></span>
+                                        <span key={idx} className="tag" style={isPopup ? {
+                                            color: colors.textSecondary,
+                                            fontSize: '10px',
+                                            lineHeight: 1.2,
+                                        } : getTagStyle(layout, colors.tagBg, colors.tagText)}><span className="tag-label">{label}</span></span>
                                     ))}
                                 </div>
                             )}
@@ -1402,21 +1397,43 @@ export const DictionaryView: React.FC<DictionaryViewProps> = ({
                                         disabled={!wordAudioOptions.length}
                                         aria-label="Play word audio"
                                     >
-                                        <VolumeUpIcon sx={{ fontSize: 22 }} />
+                                        <VolumeUpIcon sx={{ fontSize: isPopup ? 20 : 22 }} />
                                     </button>
                                 </>
+                            )}
+                            {isPopup && onDismiss && (
+                                <button
+                                    type="button"
+                                    onClick={(event) => { event.stopPropagation(); onDismiss(); }}
+                                    aria-label="Close dictionary"
+                                    title="Close"
+                                    style={{
+                                        width: '32px', height: '32px', padding: 0,
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        border: 'none', background: 'transparent', color: colors.textSecondary,
+                                        cursor: 'pointer', lineHeight: 1,
+                                    }}
+                                >
+                                    <CloseIcon sx={{ fontSize: 20 }} />
+                                </button>
                             )}
                         </div>
                     </div>
                     {entry.frequencies && entry.frequencies.length > 0 && (
-                        <div className="entry-body frequency-group-list" style={{ marginBottom: '10px', display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
-                            {entry.frequencies.map((freq, fIdx) => (
-                                <div key={fIdx} className="frequency-item" style={{ display: 'inline-flex', fontSize: '0.75em', borderRadius: '4px', overflow: 'hidden', border: `1px solid ${colors.border}` }}>
-                                    <div style={{ backgroundColor: colors.freqNameBg, color: colors.freqNameText, fontWeight: 'bold', padding: '2px 6px' }}>{freq.dictionaryName}</div>
-                                    <div style={{ backgroundColor: colors.freqValueBg, color: colors.freqValueText, padding: '2px 6px', fontWeight: 'bold' }}>{freq.value}</div>
-                                </div>
-                            ))}
-                        </div>
+                        isPopup ? (
+                            <div className="entry-body frequency-group-list" style={{ marginBottom: '5px', color: colors.textSecondary, fontSize: '11px', lineHeight: 1.3 }}>
+                                {entry.frequencies.map((freq) => `${freq.dictionaryName}: ${freq.value}`).join(' · ')}
+                            </div>
+                        ) : (
+                            <div className="entry-body frequency-group-list" style={{ marginBottom: '10px', display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                                {entry.frequencies.map((freq, fIdx) => (
+                                    <div key={fIdx} className="frequency-item" style={{ display: 'inline-flex', fontSize: '0.75em', borderRadius: '4px', overflow: 'hidden', border: `1px solid ${colors.border}` }}>
+                                        <div style={{ backgroundColor: colors.freqNameBg, color: colors.freqNameText, fontWeight: 'bold', padding: '2px 6px' }}>{freq.dictionaryName}</div>
+                                        <div style={{ backgroundColor: colors.freqValueBg, color: colors.freqValueText, padding: '2px 6px', fontWeight: 'bold' }}>{freq.value}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )
                     )}
                     {(() => {
                         const { pitchAccents, ipa } = extractPronunciationData(entry);
@@ -1436,16 +1453,16 @@ export const DictionaryView: React.FC<DictionaryViewProps> = ({
                     {entry.glossary && (
                         <div className="entry-body gloss-list definition-list">
                             {entry.glossary.map((def, defIdx) => (
-                                <div key={defIdx} className="gloss-item definition-item" data-dictionary={def.dictionaryName} style={{ display: 'flex', marginBottom: '12px' }}>
-                                    <div style={{ flexShrink: 0, width: '24px', color: colors.textMuted, fontWeight: 'bold' }}><span className="gloss-separator">{defIdx + 1}.</span></div>
+                                <div key={defIdx} className="gloss-item definition-item" data-dictionary={def.dictionaryName} style={{ display: 'flex', marginBottom: isPopup ? '5px' : '12px' }}>
+                                    <div style={{ flexShrink: 0, width: isPopup ? '18px' : '24px', color: colors.textMuted, fontWeight: isPopup ? 400 : 'bold', fontSize: isPopup ? '11px' : undefined }}><span className="gloss-separator">{defIdx + 1}.</span></div>
                                     <div style={{ flexGrow: 1 }} className="definition-item-inner definition-item-content">
-                                        <div style={{ marginBottom: '4px' }} className="definition-tag-list tag-list">
+                                        <div style={{ marginBottom: isPopup ? '2px' : '4px', color: colors.textSecondary, fontSize: isPopup ? '10px' : undefined, lineHeight: 1.2 }} className="definition-tag-list tag-list">
                                             {normalizeTagList(def.tags || []).map((t, ti) => (
-                                                <span key={ti} className="tag" style={getTagStyle(layout, colors.tagBg, colors.tagText)}><span className="tag-label">{t}</span></span>
+                                                <span key={ti} className="tag" style={isPopup ? { marginRight: '4px' } : getTagStyle(layout, colors.tagBg, colors.tagText)}><span className="tag-label">{t}</span></span>
                                             ))}
-                                            <span className="tag tag-label" style={getTagStyle(layout, colors.dictTagBg, colors.dictTagText)}>{def.dictionaryName}</span>
+                                            <span className="tag tag-label" style={isPopup ? { color: colors.textSecondary } : getTagStyle(layout, colors.dictTagBg, colors.dictTagText)}>{def.dictionaryName}</span>
                                         </div>
-                                        <div style={{ color: colors.text, whiteSpace: 'pre-wrap' }} className="gloss-content">
+                                        <div style={{ color: colors.text, whiteSpace: 'pre-wrap', fontSize: isPopup ? '13px' : undefined, lineHeight: isPopup ? 1.32 : undefined }} className="gloss-content">
                                             {def.content.filter((c: string) => c && c.trim()).map((jsonString, idx) => (
                                                 <div key={idx} style={{ marginBottom: '2px' }}>
                                                     <StructuredContent contentString={jsonString} dictionaryName={def.dictionaryName} onLinkClick={onLinkClick} onWordClick={onWordClick} colors={colors} />

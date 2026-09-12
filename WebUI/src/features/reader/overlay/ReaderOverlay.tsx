@@ -62,7 +62,7 @@ const BaseReaderOverlay = ({
 };
 
 export const ReaderOverlay = withPropsFrom(
-    memo(BaseReaderOverlay),
+    memo(BaseReaderOverlay) as typeof BaseReaderOverlay,
     [ReaderService.useOverlayMode],
     ['isDesktop', 'isMobile'],
 );

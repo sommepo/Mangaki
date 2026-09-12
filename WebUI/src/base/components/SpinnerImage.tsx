@@ -45,6 +45,8 @@ export interface SpinnerImageProps {
     retryKeyPrefix?: string;
 
     ref?: Ref<HTMLImageElement | HTMLDivElement | null>;
+
+    imgClassName?: string;
 }
 
 export const SpinnerImage = ({ ref, ...props }: SpinnerImageProps) => {
@@ -63,6 +65,7 @@ export const SpinnerImage = ({ ref, ...props }: SpinnerImageProps) => {
         hideImgStyle,
         priority,
         retryKeyPrefix,
+        imgClassName,
     } = props;
 
     const { t } = useTranslation();
@@ -144,6 +147,7 @@ export const SpinnerImage = ({ ref, ...props }: SpinnerImageProps) => {
             {showMissingImageIcon ? (
                 <Stack
                     ref={ref}
+                    className={imgClassName}
                     sx={{
                         height: '100%',
                         alignItems: 'center',
@@ -157,6 +161,7 @@ export const SpinnerImage = ({ ref, ...props }: SpinnerImageProps) => {
             ) : (
                 <Box
                     component="img"
+                    className={imgClassName}
                     key={`${src}_${imgLoadRetryKey}_${retryKeyPrefix}`}
                     sx={[
                         ...(Array.isArray(imgStyle) ? (imgStyle ?? []) : [imgStyle]),

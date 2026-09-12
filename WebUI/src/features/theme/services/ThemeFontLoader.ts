@@ -157,6 +157,12 @@ export class ThemeFontLoader {
     }
 
     static async load(theme: CssVarsThemeOptions): Promise<void> {
+        // The Android fork is deliberately self-contained. System font fallbacks
+        // are preferable to a Google Fonts request during every native startup.
+        if ('MangaReaderNative' in window) {
+            return;
+        }
+
         const fontWeightsMap = this.extract(theme.typography ?? {});
 
         const missingFontWeights = await this.detectMissing(fontWeightsMap);

@@ -1,0 +1,13 @@
+diff --git a/inference.py b/inference.py
+index 2b9a36d..8d31d14 100644
+--- a/inference.py
++++ b/inference.py
+@@ -160,4 +160,7 @@ class TextDetector:
+         lines, scores = self.seg_rep(self.input_size, lines_map)
+-        box_thresh = 0.6
++        # The upstream threshold drops readable, lower-confidence manga columns
++        # before Manga OCR can transcribe them. Keep the model's scored lines
++        # while still rejecting the low-confidence mask fringe.
++        box_thresh = 0.45
+         idx = np.where(scores[0] > box_thresh)
+         lines, scores = lines[0][idx], scores[0][idx]
