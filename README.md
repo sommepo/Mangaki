@@ -1,6 +1,8 @@
 # Mangaki
 
-Mangaki is an Android manga reader for Japanese immersion, derived from the public [Manatan](https://github.com/KolbyML/Manatan) source. It keeps Manatan's reader, zoom, OCR-overlay, dictionary lookup, and mining interaction while providing a manga-focused library and a compact, high-contrast interface.
+**Mangaki is a manga-only UI overhaul of [Manatan](https://github.com/KolbyML/Manatan).** It removes the broader anime, novel, account, paid, and sync experience in favour of a simpler Android manga library and reader, and adds focused reading-session statistics grouped by manga.
+
+The aim is to make reading, OCR lookup, and mining feel lightweight and direct while retaining Manatan's proven reader interactions. Mangaki keeps its reader, zoom, OCR overlay, dictionary lookup, and mining behaviour underneath a compact, high-contrast interface.
 
 This is an independent community fork. It is not an official Manatan release and is not affiliated with the Manatan maintainers.
 
