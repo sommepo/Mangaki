@@ -58,6 +58,9 @@ const getAudioUrlForSource = async (
                     return null;
             }
         } catch (error) {
+            // Transient failures (offline, server restart) must not poison the cache for the
+            // rest of the session; only definitive "no audio" answers are remembered.
+            audioUrlCache.delete(cacheKey);
             return null;
         }
     })();
@@ -101,45 +104,57 @@ export const playAudioFailClick = (): void => {
     oscillator.stop(now + 0.06);
 };
 
-const tryPlayAudioUrl = (url: string): Promise<boolean> =>
+type PlayAttemptResult = 'played' | 'failed' | 'superseded';
+
+const AUDIO_PLAY_TIMEOUT_MS = 10000;
+
+let pendingPlay: { cancel: () => void } | null = null;
+
+const tryPlayAudioUrl = (url: string): Promise<PlayAttemptResult> =>
     new Promise((resolve) => {
+        // A newer playback request replaces any in-flight one on the shared element; settle the
+        // older promise instead of leaving it pending forever with overwritten handlers.
+        pendingPlay?.cancel();
         const audio = getSharedAudio();
         let settled = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const attempt = { cancel: () => {} };
 
-        const cleanup = () => {
-            audio.oncanplaythrough = null;
-            audio.onerror = null;
-        };
-
-        audio.onerror = () => {
+        const finish = (result: PlayAttemptResult) => {
             if (settled) {
                 return;
             }
             settled = true;
-            cleanup();
-            resolve(false);
+            if (timeoutId !== undefined) {
+                clearTimeout(timeoutId);
+            }
+            if (pendingPlay === attempt) {
+                pendingPlay = null;
+            }
+            if (result !== 'superseded') {
+                audio.oncanplaythrough = null;
+                audio.onerror = null;
+            }
+            resolve(result);
         };
+        attempt.cancel = () => finish('superseded');
+        pendingPlay = attempt;
+
+        audio.onerror = () => finish('failed');
 
         audio.oncanplaythrough = () => {
             audio
                 .play()
-                .then(() => {
-                    if (settled) {
-                        return;
-                    }
-                    settled = true;
-                    cleanup();
-                    resolve(true);
-                })
-                .catch(() => {
-                    if (settled) {
-                        return;
-                    }
-                    settled = true;
-                    cleanup();
-                    resolve(false);
-                });
+                .then(() => finish('played'))
+                .catch(() => finish('failed'));
         };
+
+        timeoutId = setTimeout(() => {
+            if (!settled) {
+                audio.pause();
+                finish('failed');
+            }
+        }, AUDIO_PLAY_TIMEOUT_MS);
 
         audio.src = url;
         audio.load();
@@ -162,13 +177,9 @@ export const resolveWordAudioUrl = async (
     const term = entry.headword || '';
     const reading = entry.reading || '';
     const sources = selection === 'auto' ? getWordAudioSourceOptions(language) : [selection];
-    for (const source of sources) {
-        const url = await getAudioUrlForSource(source, term, reading, language);
-        if (url) {
-            return { source, url };
-        }
-    }
-    return null;
+    return resolveFirstAvailableWordAudioSource(sources, (source) =>
+        getAudioUrlForSource(source, term, reading, language),
+    );
 };
 
 export const playWordAudio = async (
@@ -184,10 +195,16 @@ export const playWordAudio = async (
         if (!url) {
             continue;
         }
-        const fallbackPlayed = await tryPlayAudioUrl(fallbackUrl);
-        if (fallbackPlayed) {
-            return fallbackSource;
+        const result = await tryPlayAudioUrl(url);
+        if (result === 'played') {
+            return source;
         }
+        if (result === 'superseded') {
+            // A newer play request took over the shared player. That is not a playback failure
+            // (callers play a fail sound on null), and we must not continue to other sources.
+            return source;
+        }
+        // 'failed': the URL resolved but could not be played, fall through to the next source.
     }
 
     return null;

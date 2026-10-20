@@ -24,7 +24,7 @@ export const OCRManager = () => {
         readingMode: state.settings.readingMode.value,
         readingDirection: state.settings.readingDirection.value,
     }));
-    const lastEncounterRef = useRef<string>();
+    const lastEncounterRef = useRef<string | undefined>(undefined);
 
     const getSpreadData = (imgSrc: string) => {
         if (!pages || pages.length === 0) return undefined;

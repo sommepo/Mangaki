@@ -16,7 +16,6 @@ import {
     logAnkiError,
     notesInfo,
 } from '@/Manatan/utils/anki';
-import { ResetButton } from '@/base/components/buttons/ResetButton.tsx';
 
 const checkboxLabelStyle: React.CSSProperties = {
     display: 'flex', alignItems: 'center', marginBottom: '8px', cursor: 'pointer', textAlign: 'left', 

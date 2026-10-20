@@ -6,6 +6,7 @@ import { apiRequest, buildChapterBaseUrl } from '@/Manatan/utils/api';
 import { isNoSpaceLanguage } from '@/Manatan/utils/language';
 import { TextBox } from '@/Manatan/components/TextBox';
 import { StatusIcon } from '@/Manatan/components/StatusIcon';
+import { computeObjectFitContentBox } from '@/Manatan/utils/overlayGeometry';
 import { useReaderOverlayStore, useReaderSettingsStore } from '@/features/reader/stores/ReaderStore';
 import { ReadingMode } from '@/features/reader/Reader.types.ts';
 
@@ -59,14 +60,30 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
     const [isVisible, setIsVisible] = useState(false);
     const containerRef = useRef<HTMLElement>(getOverlayContainer());
     const isForkReaderPage = img.classList.contains('fork-reader-page');
+    // Latest committed geometry, read by the long-lived observers below without re-subscribing
+    // them (and tearing down IntersectionObserver/ResizeObserver) on every zoom frame.
+    const dimensionsRef = useRef(dimensions);
+    dimensionsRef.current = dimensions;
+    const isVisibleRef = useRef(isVisible);
+    isVisibleRef.current = isVisible;
 
     useLayoutEffect(() => {
         if (!wrapperRef.current) return undefined;
 
         const wrapper = wrapperRef.current;
         const inner = innerRef.current;
+        let disposed = false;
+        const pendingFrames = new Set<number>();
+        const scheduleFrame = (callback: () => void) => {
+            const id = requestAnimationFrame(() => {
+                pendingFrames.delete(id);
+                if (!disposed) callback();
+            });
+            pendingFrames.add(id);
+        };
 
         const syncPosition = () => {
+            if (disposed) return;
             if (!img.isConnected) {
                 wrapper.style.display = 'none';
                 return;
@@ -97,22 +114,40 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
             // Fork reader overlays belong to the page container so a drag or
             // pinch that starts on OCR text still reaches the reader's native
             // scroll/zoom handlers. Other Manatan pages retain the fixed portal.
-            const width = isForkReaderPage ? img.offsetWidth : rect.width;
-            const height = isForkReaderPage ? img.offsetHeight : rect.height;
-            wrapper.style.transform = isForkReaderPage
-                ? `translate3d(${img.offsetLeft}px, ${img.offsetTop}px, 0)`
-                : `translate3d(${rect.left}px, ${rect.top}px, 0)`;
+            const boxWidth = isForkReaderPage ? img.offsetWidth : rect.width;
+            const boxHeight = isForkReaderPage ? img.offsetHeight : rect.height;
+            // OCR coordinates are relative to the decoded image. With object-fit
+            // (the fork reader uses `contain`), the element box can be larger than
+            // the painted page, so map onto the painted content box instead.
+            const computedStyle = window.getComputedStyle(img);
+            const content = computeObjectFitContentBox(
+                boxWidth,
+                boxHeight,
+                img.naturalWidth,
+                img.naturalHeight,
+                computedStyle.objectFit,
+                computedStyle.objectPosition,
+            );
+            const { width, height } = content;
+            const left = (isForkReaderPage ? img.offsetLeft : rect.left) + content.offsetX;
+            const top = (isForkReaderPage ? img.offsetTop : rect.top) + content.offsetY;
+            wrapper.style.transform = `translate3d(${left}px, ${top}px, 0)`;
 
             if (inner) {
                 inner.style.width = `${width}px`;
                 inner.style.height = `${height}px`;
             }
 
-            if (Math.abs(dimensions.width - width) > 1 || Math.abs(dimensions.height - height) > 1) {
+            const committed = dimensionsRef.current;
+            if (Math.abs(committed.width - width) > 1 || Math.abs(committed.height - height) > 1) {
+                dimensionsRef.current = { width, height };
                 setDimensions({ width, height });
             }
 
-            if (!isVisible) setIsVisible(true);
+            if (!isVisibleRef.current) {
+                isVisibleRef.current = true;
+                setIsVisible(true);
+            }
         };
 
         // Initial sync
@@ -123,7 +158,7 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
             (entries) => {
                 entries.forEach((entry) => {
                     if (entry.isIntersecting) {
-                        requestAnimationFrame(syncPosition);
+                        scheduleFrame(syncPosition);
                     } else {
                         wrapper.style.display = 'none';
                     }
@@ -134,7 +169,7 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
         intersectionObserver.observe(img);
 
         const resizeObserver = new ResizeObserver(() => {
-            requestAnimationFrame(syncPosition);
+            scheduleFrame(syncPosition);
         });
         resizeObserver.observe(img);
 
@@ -143,9 +178,9 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
         const onUpdateEvent = () => {
             if (ticking) return;
             ticking = true;
-            requestAnimationFrame(() => {
-                syncPosition();
+            scheduleFrame(() => {
                 ticking = false;
+                syncPosition();
             });
         };
 
@@ -159,8 +194,15 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
         document.addEventListener('visibilitychange', onVisibilityChange);
         window.addEventListener('pageshow', onUpdateEvent);
         window.addEventListener('focus', onUpdateEvent);
+        // The painted content box depends on the natural size, which can change on decode
+        // without the element box resizing (e.g. a fixed-height fit).
+        img.addEventListener('load', onUpdateEvent);
 
         return () => {
+            disposed = true;
+            img.removeEventListener('load', onUpdateEvent);
+            pendingFrames.forEach((id) => cancelAnimationFrame(id));
+            pendingFrames.clear();
             intersectionObserver.disconnect();
             resizeObserver.disconnect();
             window.removeEventListener('scroll', onUpdateEvent, true);
@@ -171,7 +213,7 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
             window.removeEventListener('pageshow', onUpdateEvent);
             window.removeEventListener('focus', onUpdateEvent);
         };
-    }, [img, dimensions.width, dimensions.height, isForkReaderPage, isVisible]);
+    }, [img, isForkReaderPage]);
 
     const portalTarget = isForkReaderPage && img.parentElement ? img.parentElement : containerRef.current;
 
@@ -204,8 +246,12 @@ const BaseImageOverlayInner: React.FC<ImageOverlayInnerProps> = ({
 
                 {isVisible &&
                     data
-                        ?.filter((block) => block.text.replace(/[\s\u200B]/g, '').length > 0)
-                        .map((block: OcrBlock, i: number) => (
+                        // Keep each block's index into `data`: update/merge/delete callbacks
+                        // and popup highlights address the unfiltered array, so indices from
+                        // the filtered list would edit the wrong block after an empty one.
+                        ?.map((block: OcrBlock, i: number) => ({ block, i }))
+                        .filter(({ block }) => block.text.replace(/[\s\u200B]/g, '').length > 0)
+                        .map(({ block, i }) => (
                             <TextBox
                                 key={`${i}-${block.text.substring(0, 5)}`}
                                 index={i}
@@ -289,6 +335,10 @@ export const ImageOverlay: React.FC<{
     const hideTimerRef = useRef<number | null>(null);
     const isPopupOpenRef = useRef(false);
     const fetchInFlightRef = useRef(false);
+    // Read through a ref so `fetchOCR` (passed as the memoised inner overlay's `onRetry`) keeps a
+    // stable identity instead of changing every time any page's OCR result lands in the cache.
+    const ocrCacheRef = useRef(ocrCache);
+    ocrCacheRef.current = ocrCache;
 
     useEffect(() => {
         const cached = ocrCache.get(img.src);
@@ -308,7 +358,7 @@ export const ImageOverlay: React.FC<{
     }, [dictPopup.visible]);
 
     const fetchOCR = useCallback(async () => {
-        if (!img.src || ocrCache.has(img.src) || fetchInFlightRef.current) return;
+        if (!img.src || ocrCacheRef.current.has(img.src) || fetchInFlightRef.current) return;
         const isForkPage = img.src.includes('/api/fork/volumes/');
         const provider = settings.ocrProvider ?? (settings.allowGoogleLensOcr ? 'lens' : 'on_device');
         if (!isForkPage && provider !== 'lens') {
@@ -372,7 +422,6 @@ export const ImageOverlay: React.FC<{
         }
     }, [
         img.src,
-        ocrCache,
         setOcrStatus,
         updateOcrData,
         serverSettings,

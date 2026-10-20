@@ -313,7 +313,7 @@ export const buildSentenceFuriganaFromLookup = async (
         index: number,
         grouping: 'grouped' | 'flat',
         language?: YomitanLanguage,
-    ) => Promise<FuriganaLookupResult[] | 'loading'>,
+    ) => Promise<FuriganaLookupResult[] | { terms?: FuriganaLookupResult[] } | 'loading'>,
     options: FuriganaLookupOptions = {},
 ): Promise<string> => {
     if (!sentence) {
@@ -336,7 +336,9 @@ export const buildSentenceFuriganaFromLookup = async (
             return sentence;
         }
 
-        const best = Array.isArray(results) && results.length > 0 ? results[0] : null;
+        // `lookupYomitan` resolves to `{ terms, kanji }`; accept a bare term array as well.
+        const terms = Array.isArray(results) ? results : results?.terms;
+        const best = Array.isArray(terms) && terms.length > 0 ? terms[0] : null;
         const matchLen = best?.matchLen || 0;
         if (!best || matchLen <= 0) {
             result += sentence[index];

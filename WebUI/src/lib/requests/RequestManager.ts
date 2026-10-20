@@ -10,6 +10,7 @@ import { RequestError } from '@/lib/requests/RequestError.ts';
 import { DefaultLanguage } from '@/base/utils/Languages.ts';
 import { UrlUtil } from '@/lib/UrlUtil.ts';
 import { NetworkStatus } from '@/lib/requests/RequestStatus.ts';
+import { ForkApi } from '@/features/fork/ForkApi.ts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { d } from 'koration';
 import { HttpMethod, IRestClient, RestClient } from '@/lib/requests/client/RestClient.ts';
@@ -405,6 +406,15 @@ export const SPECIAL_ED_SOURCES = {
 
 // TODO - extract logic to reduce the size of this file... grew waaaaaaaaaaaaay too big peepoFat
 // TODO - correctly update cache after all mutations instead of refetching queries
+type ForkReaderVolumeMapping = {
+    volumeId: string;
+    seriesId: string;
+    pageCount: number;
+    fingerprint: string;
+    progressPage: number;
+    sensitive: boolean;
+};
+
 export class RequestManager {
     public static readonly API_VERSION = '/api/v1/';
 
@@ -416,15 +426,14 @@ export class RequestManager {
 
     private readonly imageQueue: SourceAwareQueue;
 
-    private readonly forkReaderVolumesByMangaId = new Map<
-        number,
-        { volumeId: string; seriesId: string; pageCount: number; fingerprint: string; progressPage: number }
-    >();
+    private static readonly FORK_SERIES_META_KEY = 'mangaki_fork_series_reader_meta_v1';
 
-    private readonly forkReaderVolumesByChapterId = new Map<
-        number,
-        { volumeId: string; seriesId: string; pageCount: number; fingerprint: string; progressPage: number }
-    >();
+    private readonly forkReaderVolumesByMangaId = new Map<number, ForkReaderVolumeMapping>();
+
+    /** Reader chapter index (sourceOrder, 1-based) → volume, per fork manga id. */
+    private readonly forkReaderSeriesByMangaId = new Map<number, ForkReaderVolumeMapping[]>();
+
+    private readonly forkReaderVolumesByChapterId = new Map<number, ForkReaderVolumeMapping>();
 
     private serverSettingsSnapshot?: GetServerSettingsQuery;
 
@@ -471,6 +480,41 @@ export class RequestManager {
         return this.forkReaderVolumesByChapterId.get(chapterId)?.volumeId;
     }
 
+    /** NSFW flag of an opened fork volume (series flag or volume flag), once the reader has loaded it. */
+    public isForkReaderVolumeSensitive(volumeId: string): boolean | undefined {
+        return this.forkReaderVolumesByChapterId.get(this.getForkReaderChapterId(volumeId))?.sensitive;
+    }
+
+    private getForkSeriesIdForManga(mangaId: number): string | undefined {
+        return this.forkReaderVolumesByMangaId.get(mangaId)?.seriesId;
+    }
+
+    private readForkSeriesMeta(): Record<string, Record<string, string>> {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(RequestManager.FORK_SERIES_META_KEY) ?? '{}');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+
+    /**
+     * Fork series are not manga rows of the bundled server, so their per-series reader settings
+     * (direction, mode, scale, …) are kept locally instead of POSTing to /api/v1/meta/manga/<synthetic id>.
+     */
+    private updateForkSeriesMeta(seriesId: string, key: string, value: string | null): void {
+        const all = this.readForkSeriesMeta();
+        const meta = { ...(all[seriesId] ?? {}) };
+        if (value === null) delete meta[key];
+        else meta[key] = value;
+        all[seriesId] = meta;
+        try {
+            localStorage.setItem(RequestManager.FORK_SERIES_META_KEY, JSON.stringify(all));
+        } catch {
+            // Quota or private-mode failures only lose the per-series override.
+        }
+    }
+
     private getForkVolumeId(mangaId: number | string): string | undefined {
         if (typeof mangaId !== 'string' || !mangaId.startsWith(RequestManager.FORK_READER_ID_PREFIX)) {
             return undefined;
@@ -499,20 +543,12 @@ export class RequestManager {
     }
 
     private async getForkReaderData(volumeId: string, signal: AbortSignal) {
-        const response = await this.restClient.fetcher('/api/fork/catalogue', { config: { signal } });
-        const catalogue = (await response.json()) as Array<{
-            id: string;
-            sourceId: string;
-            title: string;
-            volumes: Array<{
-                id: string;
-                title: string;
-                pageCount: number;
-                fingerprint: string;
-                progressPage: number;
-                downloadState: string;
-            }>;
-        }>;
+        // The manga and chapter queries both need the catalogue; ForkApi shares one in-flight
+        // request between them (and the library cache) instead of downloading it twice.
+        const catalogue = await ForkApi.catalogue();
+        if (signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+        }
         const series = catalogue.find((candidate) => candidate.volumes.some((volume) => volume.id === volumeId));
         const volume = series?.volumes.find((candidate) => candidate.id === volumeId);
         if (!series || !volume) {
@@ -521,12 +557,13 @@ export class RequestManager {
 
         const mangaId = this.getStableForkId('manga', series.id);
         const chapterId = this.getStableForkId('chapter', volume.id);
-        const mappings = series.volumes.map((candidate) => ({
+        const mappings: ForkReaderVolumeMapping[] = series.volumes.map((candidate) => ({
             volumeId: candidate.id,
             seriesId: series.id,
             pageCount: candidate.pageCount,
             fingerprint: candidate.fingerprint,
             progressPage: candidate.progressPage,
+            sensitive: Boolean(series.sensitive || candidate.sensitive),
         }));
         for (const mapping of mappings) {
             this.forkReaderVolumesByChapterId.set(
@@ -538,6 +575,7 @@ export class RequestManager {
             mangaId,
             mappings.find((candidate) => candidate.volumeId === volume.id)!,
         );
+        this.forkReaderSeriesByMangaId.set(mangaId, mappings);
 
         return { series, volume, mangaId, chapterId };
     }
@@ -3058,7 +3096,9 @@ export class RequestManager {
                                 displayName: 'Mangaki library',
                                 lang: 'ja',
                             },
-                            meta: [],
+                            meta: Object.entries(this.readForkSeriesMeta()[series.id] ?? {}).map(
+                                ([key, value]) => ({ key, value }),
+                            ),
                             chapters: { totalCount: series.volumes.length },
                             trackRecords: { totalCount: 0, nodes: [] },
                         }),
@@ -3444,6 +3484,15 @@ export class RequestManager {
         options?: MutationOptions<SetMangaMetadataMutation, SetMangaMetadataMutationVariables>,
     ): AbortableApolloMutationResponse<SetMangaMetadataMutation> {
         return this.doRestMutation(async (signal) => {
+            const forkSeriesId = this.getForkSeriesIdForManga(mangaId);
+            if (forkSeriesId) {
+                this.updateForkSeriesMeta(forkSeriesId, key, `${value}`);
+                return {
+                    setMangaMeta: {
+                        meta: { mangaId, key, value: `${value}` },
+                    },
+                } as SetMangaMetadataMutation;
+            }
             await this.restClient.fetcher(`/api/v1/meta/manga/${mangaId}`, {
                 httpMethod: HttpMethod.POST,
                 data: { key, value: `${value}` },
@@ -3463,6 +3512,15 @@ export class RequestManager {
         options?: MutationOptions<DeleteMangaMetadataMutation, DeleteMangaMetadataMutationVariables>,
     ): AbortableApolloMutationResponse<DeleteMangaMetadataMutation> {
         return this.doRestMutation(async (signal) => {
+            const forkSeriesId = this.getForkSeriesIdForManga(mangaId);
+            if (forkSeriesId) {
+                this.updateForkSeriesMeta(forkSeriesId, key, null);
+                return {
+                    deleteMangaMeta: {
+                        meta: { mangaId, key, value: '' },
+                    },
+                } as DeleteMangaMetadataMutation;
+            }
             await this.restClient.fetcher(`/api/v1/meta/manga/${mangaId}`, {
                 httpMethod: HttpMethod.DELETE,
                 data: { key, value: null },
@@ -3679,6 +3737,7 @@ export class RequestManager {
             const resolvedChapterId = Number(variables?.input?.chapterId ?? chapterId ?? -1);
             const forkVolume =
                 this.forkReaderVolumesByChapterId.get(resolvedChapterId) ??
+                this.forkReaderSeriesByMangaId.get(resolvedMangaId)?.[resolvedChapterIndex - 1] ??
                 this.forkReaderVolumesByMangaId.get(resolvedMangaId);
             if (forkVolume) {
                 const pages = Array.from({ length: forkVolume.pageCount }, (_, page) =>
@@ -3776,6 +3835,7 @@ export class RequestManager {
                     },
                 );
                 forkVolume.progressPage = page;
+                ForkApi.patchCachedProgress(forkVolume.volumeId, page);
                 return {
                     updateChapter: {
                         chapter: {
@@ -3859,7 +3919,9 @@ export class RequestManager {
     }
 
     public getChapterPageUrl(mangaId: number | string, chapterIndex: number | string, page: number): string {
-        const forkVolume = this.forkReaderVolumesByMangaId.get(Number(mangaId));
+        const forkVolume =
+            this.forkReaderSeriesByMangaId.get(Number(mangaId))?.[Number(chapterIndex) - 1] ??
+            this.forkReaderVolumesByMangaId.get(Number(mangaId));
         if (forkVolume) {
             return `/api/fork/volumes/${encodeURIComponent(forkVolume.volumeId)}/pages/${page}?fingerprint=${encodeURIComponent(forkVolume.fingerprint)}`;
         }
@@ -3897,6 +3959,7 @@ export class RequestManager {
                             },
                         );
                         volume.progressPage = page;
+                        ForkApi.patchCachedProgress(volume.volumeId, page);
                     }),
                 );
                 return {

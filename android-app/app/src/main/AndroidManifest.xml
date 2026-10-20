@@ -12,6 +12,8 @@
 
     <application
         android:allowNativeHeapPointerTagging="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:enableOnBackInvokedCallback="true"
         android:hasFragileUserData="true"
         android:icon="@mipmap/ic_launcher"
@@ -24,16 +26,30 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+        <!-- Read-only, non-exported share point for handing mined media to AnkiDroid. -->
+        <provider
+            android:name=".AnkiMediaProvider"
+            android:authorities="dev.local.mangareader.ankimedia"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <!--
+            Rotation, fold/unfold, multi-window resizing, moving between displays and keyboard
+            changes are handled in place so the WebView (and the reader page/zoom) survives.
+            uiMode is deliberately not listed: a light/dark switch recreates the activity so the
+            DayNight theme, and with it the page's prefers-color-scheme, follows the system.
+        -->
         <activity
             android:name=".WebviewActivity"
-            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation"
             android:exported="false"
             android:label="Mangaki"
             android:launchMode="singleTop"
-            android:theme="@android:style/Theme.NoTitleBar" />
+            android:resizeableActivity="true"
+            android:theme="@style/MangakiWebTheme"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".MangatanActivity"
-            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode|fontScale|locale|layoutDirection"
             android:exported="true"
             android:label="Mangaki"
             android:launchMode="singleTop">

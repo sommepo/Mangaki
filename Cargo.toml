@@ -9,6 +9,7 @@ members = [
     "crates/sync-server",
     "crates/yomitan-server",
     "crates/manga-reader-core",
+    "crates/fork-api-host-tests",
 ]
 exclude = ["bin/manatan"]
 resolver = "2"

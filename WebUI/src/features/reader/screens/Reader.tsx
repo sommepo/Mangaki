@@ -43,6 +43,7 @@ import {
 
 import { ReaderAutoScroll } from '@/features/reader/auto-scroll/ReaderAutoScroll.tsx';
 import { ForkReaderPageScrubber } from '@/features/fork/ForkReaderPageScrubber.tsx';
+import { ACTIVE_SERIES_KEY, ACTIVE_SERIES_SENSITIVE_KEY } from '@/features/fork/ForkApi.ts';
 import { ReaderZoomProvider } from '@/features/reader/zoom/ReaderZoomContext.tsx';
 
 const BaseReader = ({
@@ -133,13 +134,18 @@ const BaseReader = ({
         const sourceId = `${mangaResponse.data?.manga?.sourceId ?? ''}`;
         const seriesId = sourceId.startsWith('fork:') ? sourceId.slice('fork:'.length) : '';
         if (!seriesId) return undefined;
-        sessionStorage.setItem('manga_reader_active_series_id', seriesId);
+        // Stats events from shared reader code (page encounters, lookups, mining) inherit this
+        // context, including the NSFW flag so hidden manga stay out of itemised statistics.
+        const sensitive = volumeId ? requestManager.isForkReaderVolumeSensitive(volumeId) : undefined;
+        sessionStorage.setItem(ACTIVE_SERIES_KEY, seriesId);
+        sessionStorage.setItem(ACTIVE_SERIES_SENSITIVE_KEY, sensitive ? '1' : '0');
         return () => {
-            if (sessionStorage.getItem('manga_reader_active_series_id') === seriesId) {
-                sessionStorage.removeItem('manga_reader_active_series_id');
+            if (sessionStorage.getItem(ACTIVE_SERIES_KEY) === seriesId) {
+                sessionStorage.removeItem(ACTIVE_SERIES_KEY);
+                sessionStorage.removeItem(ACTIVE_SERIES_SENSITIVE_KEY);
             }
         };
-    }, [forkMode, mangaResponse.data?.manga?.sourceId]);
+    }, [forkMode, mangaResponse.data?.manga?.sourceId, volumeId]);
 
     useReaderResetStates();
     useReaderSetSettingsState(

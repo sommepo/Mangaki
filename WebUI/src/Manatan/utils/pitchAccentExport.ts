@@ -5,6 +5,7 @@ type PitchInfoLike = {
     pattern?: string;
     nasal?: number[];
     devoice?: number[];
+    tags?: string[];
 };
 
 type PitchAccentLike = {

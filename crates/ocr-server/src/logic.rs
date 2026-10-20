@@ -412,7 +412,9 @@ pub async fn fetch_and_process_with_provider(
                     url,
                     last_error
                 );
-                tokio::time::sleep(Duration::from_secs(attempt_number)).await;
+                if attempt_number < 3 {
+                    tokio::time::sleep(Duration::from_secs(attempt_number)).await;
+                }
             }
         }
     }
@@ -438,21 +440,13 @@ pub async fn get_raw_ocr_data(
     pass: Option<String>,
     language: OcrLanguage,
 ) -> anyhow::Result<Vec<RawChunk>> {
-    let reader = ImageReader::new(Cursor::new(image_bytes))
-        .with_guessed_format()
-        .map_err(|err| anyhow!("Failed with_guessed_format: {err:?}"))?;
-
-    let decoded_image = if reader.format() == Some(ImageFormat::Avif) {
-        decode_avif_custom(image_bytes)?
-    } else {
-        reader
-            .decode()
-            .map_err(|err| anyhow!("Failed decode: {err:?}"))?
-    };
-
-    let full_image_width = decoded_image.width();
-    let full_image_height = decoded_image.height();
-    let chunk_height_limit = 3000;
+    // Decoding a full manga page and re-encoding its chunks is CPU-bound; keep it off the
+    // async worker threads that also serve page images and dictionary lookups.
+    let owned_bytes = image_bytes.to_vec();
+    let (full_image_width, full_image_height, encoded_chunks) =
+        tokio::task::spawn_blocking(move || decode_and_chunk_page(&owned_bytes))
+            .await
+            .map_err(|err| anyhow!("OCR decode task failed: {err}"))??;
 
     let mut raw_chunks = Vec::new();
 
@@ -503,28 +497,7 @@ pub async fn get_raw_ocr_data(
         LensClient::new(None)
     };
 
-    let mut current_y_position = 0;
-    while current_y_position < full_image_height {
-        let current_chunk_height =
-            std::cmp::min(chunk_height_limit, full_image_height - current_y_position);
-        if current_chunk_height == 0 {
-            break;
-        }
-
-        let chunk_image = decoded_image
-            .view(
-                0,
-                current_y_position,
-                full_image_width,
-                current_chunk_height,
-            )
-            .to_image();
-        let mut image_buffer = Cursor::new(Vec::new());
-        chunk_image
-            .write_to(&mut image_buffer, ImageFormat::Png)
-            .map_err(|err| anyhow!("Failed write_to: {err:?}"))?;
-        let chunk_png_bytes = image_buffer.into_inner();
-
+    for (current_y_position, current_chunk_height, chunk_png_bytes) in encoded_chunks {
         let lens_response = lens_client
             .process_image_bytes(&chunk_png_bytes, Some("jp"))
             .await
@@ -607,11 +580,60 @@ pub async fn get_raw_ocr_data(
             full_width: full_image_width,
             full_height: full_image_height,
         });
-
-        current_y_position += chunk_height_limit;
     }
 
     Ok(raw_chunks)
+}
+
+/// A page split into PNG-encoded horizontal chunks: (global_y, chunk_height, png_bytes).
+type EncodedChunks = Vec<(u32, u32, Vec<u8>)>;
+
+/// Decode a page image and split it into PNG chunks no taller than the Lens limit.
+/// Blocking/CPU-bound: call from `spawn_blocking`.
+fn decode_and_chunk_page(image_bytes: &[u8]) -> anyhow::Result<(u32, u32, EncodedChunks)> {
+    const CHUNK_HEIGHT_LIMIT: u32 = 3000;
+
+    let reader = ImageReader::new(Cursor::new(image_bytes))
+        .with_guessed_format()
+        .map_err(|err| anyhow!("Failed with_guessed_format: {err:?}"))?;
+
+    let decoded_image = if reader.format() == Some(ImageFormat::Avif) {
+        decode_avif_custom(image_bytes)?
+    } else {
+        reader
+            .decode()
+            .map_err(|err| anyhow!("Failed decode: {err:?}"))?
+    };
+
+    let full_image_width = decoded_image.width();
+    let full_image_height = decoded_image.height();
+    let mut chunks = Vec::new();
+    let mut current_y_position = 0;
+    while current_y_position < full_image_height {
+        let current_chunk_height =
+            std::cmp::min(CHUNK_HEIGHT_LIMIT, full_image_height - current_y_position);
+        if current_chunk_height == 0 {
+            break;
+        }
+
+        let chunk_image = decoded_image
+            .view(
+                0,
+                current_y_position,
+                full_image_width,
+                current_chunk_height,
+            )
+            .to_image();
+        let mut image_buffer = Cursor::new(Vec::new());
+        chunk_image
+            .write_to(&mut image_buffer, ImageFormat::Png)
+            .map_err(|err| anyhow!("Failed write_to: {err:?}"))?;
+        chunks.push((current_y_position, current_chunk_height, image_buffer.into_inner()));
+
+        current_y_position += CHUNK_HEIGHT_LIMIT;
+    }
+
+    Ok((full_image_width, full_image_height, chunks))
 }
 
 async fn fetch_and_process_internal(
@@ -661,29 +683,16 @@ async fn fetch_and_process_internal(
     // does not upload the image to an OCR service.
     #[cfg(target_os = "android")]
     if !use_network_provider {
-        let mut detected = android_on_device_ocr(&image_bytes)?;
-        let reader = ImageReader::new(Cursor::new(&image_bytes)).with_guessed_format()?;
-        let (width, height) = reader.into_dimensions()?;
-        for result in &mut detected {
-            result.tight_bounding_box.x *= width as f64;
-            result.tight_bounding_box.y *= height as f64;
-            result.tight_bounding_box.width *= width as f64;
-            result.tight_bounding_box.height *= height as f64;
-        }
-        let merge_config = MergeConfig {
-            add_space_on_merge,
-            language,
-            ..MergeConfig::default()
-        };
-        let mut merged = merge::auto_merge(detected, width, height, &merge_config);
-        for result in &mut merged {
-            result.tight_bounding_box.x /= width as f64;
-            result.tight_bounding_box.y /= height as f64;
-            result.tight_bounding_box.width /= width as f64;
-            result.tight_bounding_box.height /= height as f64;
-        }
-        return Ok(merged);
+        // ML Kit recognition is a synchronous JNI call that can take seconds per page. Run it
+        // on the blocking pool so it cannot stall the async workers serving the reader.
+        return tokio::task::spawn_blocking(move || {
+            android_on_device_pipeline(&image_bytes, add_space_on_merge, language)
+        })
+        .await
+        .map_err(|error| anyhow!("Bundled Japanese OCR task failed: {error}"))?;
     }
+    #[cfg(not(target_os = "android"))]
+    let _ = use_network_provider;
 
     // 2. Decode & OCR (Wrapped) - now passes user/pass for proxy settings
     let raw_chunks = get_raw_ocr_data(&image_bytes, user, pass, language).await?;
@@ -721,6 +730,36 @@ async fn fetch_and_process_internal(
 }
 
 #[cfg(target_os = "android")]
+fn android_on_device_pipeline(
+    image_bytes: &[u8],
+    add_space_on_merge: Option<bool>,
+    language: OcrLanguage,
+) -> anyhow::Result<Vec<OcrResult>> {
+    let mut detected = android_on_device_ocr(image_bytes)?;
+    let reader = ImageReader::new(Cursor::new(image_bytes)).with_guessed_format()?;
+    let (width, height) = reader.into_dimensions()?;
+    for result in &mut detected {
+        result.tight_bounding_box.x *= width as f64;
+        result.tight_bounding_box.y *= height as f64;
+        result.tight_bounding_box.width *= width as f64;
+        result.tight_bounding_box.height *= height as f64;
+    }
+    let merge_config = MergeConfig {
+        add_space_on_merge,
+        language,
+        ..MergeConfig::default()
+    };
+    let mut merged = merge::auto_merge(detected, width, height, &merge_config);
+    for result in &mut merged {
+        result.tight_bounding_box.x /= width as f64;
+        result.tight_bounding_box.y /= height as f64;
+        result.tight_bounding_box.width /= width as f64;
+        result.tight_bounding_box.height /= height as f64;
+    }
+    Ok(merged)
+}
+
+#[cfg(target_os = "android")]
 fn android_on_device_ocr(image_bytes: &[u8]) -> anyhow::Result<Vec<OcrResult>> {
     use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
 
@@ -730,47 +769,52 @@ fn android_on_device_ocr(image_bytes: &[u8]) -> anyhow::Result<Vec<OcrResult>> {
     let mut env = vm
         .attach_current_thread()
         .map_err(|error| anyhow!("Attach Android OCR thread: {error}"))?;
-    let context = unsafe { JObject::from_raw(android.context().cast()) };
-    let loader = env
-        .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|value| value.l())
-        .map_err(|error| anyhow!("Load Android OCR class loader: {error}"))?;
-    let name = env
-        .new_string("dev.local.mangareader.OnDeviceOcr")
-        .map_err(|error| anyhow!("Create Android OCR class name: {error}"))?;
-    let class = env
-        .call_method(
-            loader,
-            "loadClass",
-            "(Ljava/lang/String;)Ljava/lang/Class;",
-            &[JValue::Object(&name)],
-        )
-        .and_then(|value| value.l())
-        .map(JClass::from)
-        .map_err(|error| {
-            let _ = env.exception_clear();
-            anyhow!("Load bundled Japanese OCR bridge: {error}")
-        })?;
-    let bytes: JByteArray = env
-        .byte_array_from_slice(image_bytes)
-        .map_err(|error| anyhow!("Copy OCR page into Android: {error}"))?;
-    let bytes_obj = JObject::from(bytes);
-    let output = env
-        .call_static_method(
-            class,
-            "recognizeJapanese",
-            "([B)Ljava/lang/String;",
-            &[JValue::Object(&bytes_obj)],
-        )
-        .and_then(|value| value.l())
-        .map_err(|error| {
-            let _ = env.exception_clear();
-            anyhow!("Bundled Japanese OCR failed: {error}")
-        })?;
-    let output = JString::from(output);
-    let json: String = env
-        .get_string(&output)
-        .map_err(|error| anyhow!("Read Android OCR response: {error}"))?
-        .into();
+    // Free every local reference (including the page-sized byte array) when the call returns,
+    // even if this thread stays attached to the VM and is reused for many pages.
+    let json: String = env.with_local_frame(16, |env| -> anyhow::Result<String> {
+        let context = unsafe { JObject::from_raw(android.context().cast()) };
+        let loader = env
+            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .and_then(|value| value.l())
+            .map_err(|error| anyhow!("Load Android OCR class loader: {error}"))?;
+        let name = env
+            .new_string("dev.local.mangareader.OnDeviceOcr")
+            .map_err(|error| anyhow!("Create Android OCR class name: {error}"))?;
+        let class = env
+            .call_method(
+                loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[JValue::Object(&name)],
+            )
+            .and_then(|value| value.l())
+            .map(JClass::from)
+            .map_err(|error| {
+                let _ = env.exception_clear();
+                anyhow!("Load bundled Japanese OCR bridge: {error}")
+            })?;
+        let bytes: JByteArray = env
+            .byte_array_from_slice(image_bytes)
+            .map_err(|error| anyhow!("Copy OCR page into Android: {error}"))?;
+        let bytes_obj = JObject::from(bytes);
+        let output = env
+            .call_static_method(
+                class,
+                "recognizeJapanese",
+                "([B)Ljava/lang/String;",
+                &[JValue::Object(&bytes_obj)],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| {
+                let _ = env.exception_clear();
+                anyhow!("Bundled Japanese OCR failed: {error}")
+            })?;
+        let output = JString::from(output);
+        let json: String = env
+            .get_string(&output)
+            .map_err(|error| anyhow!("Read Android OCR response: {error}"))?
+            .into();
+        Ok(json)
+    })?;
     serde_json::from_str(&json).map_err(|error| anyhow!("Validate Android OCR response: {error}"))
 }

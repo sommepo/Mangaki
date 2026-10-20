@@ -7,6 +7,9 @@ export const useMangaObserver = () => {
 
     useEffect(() => {
         const { imageContainerSelectors: selectors } = settings.site;
+        // Overlays are keyed by `img.src`; an element reused for another page (new src) must be
+        // reported as a change or its overlay keeps the previous page's OCR boxes.
+        let lastForkSrcs: string[] = [];
 
         const scan = () => {
             const found: HTMLImageElement[] = [];
@@ -20,8 +23,14 @@ export const useMangaObserver = () => {
                     const rect = img.getBoundingClientRect();
                     return rect.bottom >= -viewportBuffer && rect.top <= window.innerHeight + viewportBuffer;
                 });
+                const nearbySrcs = nearbyPages.map((img) => img.src);
+                const srcsUnchanged =
+                    lastForkSrcs.length === nearbySrcs.length &&
+                    lastForkSrcs.every((src, index) => src === nearbySrcs[index]);
+                lastForkSrcs = nearbySrcs;
                 setImages((previous) => {
                     if (
+                        srcsUnchanged &&
                         previous.length === nearbyPages.length &&
                         previous.every((img, index) => img === nearbyPages[index])
                     ) {

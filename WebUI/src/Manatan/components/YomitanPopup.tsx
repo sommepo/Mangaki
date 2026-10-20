@@ -94,6 +94,8 @@ export const YomitanPopup = () => {
     }, [closePopup, dictPopup.visible]);
 
     const maxHistory = settings.yomitanLookupMaxHistory || 10;
+    const lookupGrouping = settings.resultGroupingMode || 'grouped';
+    const lookupLanguage = settings.yomitanLanguage || 'japanese';
     const navMode = settings.yomitanLookupNavigationMode || 'stacked';
 
     const currentEntry = historyIndex >= 0 && historyIndex < history.length ? history[historyIndex] : null;
@@ -124,8 +126,10 @@ export const YomitanPopup = () => {
 
     // Sync history when initial lookup completes
     React.useEffect(() => {
-        if (!dictPopup.visible) {
-            setHistory([]);
+        if (!dictPopup.visible || dictPopup.isLoading) {
+            // A fresh lookup from the page replaces any recursive-lookup history; otherwise the
+            // previous word's entry stays on screen until the new results arrive.
+            setHistory((prev) => (prev.length ? [] : prev));
             setHistoryIndex(-1);
             return;
         }
@@ -217,7 +221,7 @@ export const YomitanPopup = () => {
         }
 
         try {
-            const results = await lookupYomitan(cleanText, 0, settings.resultGroupingMode || 'grouped', settings.yomitanLanguage || 'japanese');
+            const results = await lookupYomitan(cleanText, 0, lookupGrouping, lookupLanguage);
             const loadedResults = results === 'loading' ? [] : ((results as any).terms || results || []);
             const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
             const isSystemLoading = results === 'loading';
@@ -247,7 +251,7 @@ export const YomitanPopup = () => {
                 return newHistory;
             });
         }
-    }, [setDictPopup, navMode, historyIndex, maxHistory]);
+    }, [navMode, historyIndex, maxHistory, lookupGrouping, lookupLanguage]);
 
     const handleWordClick = useCallback(async (text: string, position: number) => {
         const textEncoder = new TextEncoder();
@@ -283,7 +287,7 @@ export const YomitanPopup = () => {
         }
 
         try {
-            const results = await lookupYomitan(cleanText, prefixBytes, settings.resultGroupingMode || 'grouped', settings.yomitanLanguage || 'japanese');
+            const results = await lookupYomitan(cleanText, prefixBytes, lookupGrouping, lookupLanguage);
             const loadedResults = results === 'loading' ? [] : ((results as any).terms || results || []);
             const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
             const isSystemLoading = results === 'loading';
@@ -315,7 +319,7 @@ export const YomitanPopup = () => {
                 return newHistory;
             });
         }
-    }, [navMode, historyIndex, maxHistory]);
+    }, [navMode, historyIndex, maxHistory, lookupGrouping, lookupLanguage]);
 
     const handleKanjiClick = useCallback(async (char: string) => {
         const newEntry: LookupHistoryEntry = {
@@ -346,7 +350,7 @@ export const YomitanPopup = () => {
         }
 
         try {
-            const results = await lookupYomitan(char, 0, settings.resultGroupingMode || 'grouped', settings.yomitanLanguage || 'japanese');
+            const results = await lookupYomitan(char, 0, lookupGrouping, lookupLanguage);
             const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
             const isSystemLoading = results === 'loading';
 
@@ -374,7 +378,7 @@ export const YomitanPopup = () => {
                 return newHistory;
             });
         }
-    }, [navMode, historyIndex, maxHistory, settings.resultGroupingMode, settings.yomitanLanguage]);
+    }, [navMode, historyIndex, maxHistory, lookupGrouping, lookupLanguage]);
 
     const navigateToHistory = useCallback((index: number) => {
         if (index >= 0 && index < history.length) {
@@ -539,7 +543,7 @@ export const YomitanPopup = () => {
             closePopup();
         };
         const onBlock = (event: Event) => event.stopPropagation();
-        const options = { passive: false };
+        const options: AddEventListenerOptions = { passive: false };
 
         element.addEventListener('touchstart', onTouchStart, options);
         element.addEventListener('touchend', onTouchEnd, options);
@@ -547,11 +551,12 @@ export const YomitanPopup = () => {
         element.addEventListener('mousedown', onBlock, options);
         element.addEventListener('contextmenu', onClick, options);
         return () => {
-            element.removeEventListener('touchstart', onTouchStart, options);
-            element.removeEventListener('touchend', onTouchEnd, options);
-            element.removeEventListener('click', onClick, options);
-            element.removeEventListener('mousedown', onBlock, options);
-            element.removeEventListener('contextmenu', onClick, options);
+            // Removal matches on the capture flag only (non-capturing here).
+            element.removeEventListener('touchstart', onTouchStart, false);
+            element.removeEventListener('touchend', onTouchEnd, false);
+            element.removeEventListener('click', onClick, false);
+            element.removeEventListener('mousedown', onBlock, false);
+            element.removeEventListener('contextmenu', onClick, false);
         };
     }, [closePopup, dictPopup.visible]);
 

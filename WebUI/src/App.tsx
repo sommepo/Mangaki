@@ -23,10 +23,7 @@ import { requestManager } from '@/lib/requests/RequestManager';
 import { AuthManager } from '@/features/authentication/AuthManager';
 import { OCRProvider } from '@/Manatan/context/OCRContext';
 import { OCRManager } from '@/Manatan/OCRManager';
-import { Activity } from '@/features/fork/Activity';
-import { Stats } from '@/features/fork/Stats';
 import { SourceOnboarding } from '@/features/fork/SourceOnboarding';
-import { SeriesDetail } from '@/features/fork/SeriesDetail';
 import { BackgroundJobBridge } from '@/features/fork/BackgroundJobBridge';
 
 const { Library } = loadable(() => import('@/features/library/screens/Library'), lazyLoadFallback);
@@ -34,6 +31,9 @@ const { Manga } = loadable(() => import('@/features/manga/screens/Manga'), lazyL
 const { Reader } = loadable(() => import('@/features/reader/screens/Reader'), lazyLoadFallback);
 const { Settings } = loadable(() => import('@/features/settings/screens/Settings'), lazyLoadFallback);
 const { Dictionary } = loadable(() => import('@/features/dictionary/Dictionary'), lazyLoadFallback);
+const { SeriesDetail } = loadable(() => import('@/features/fork/SeriesDetail'), lazyLoadFallback);
+const { Activity } = loadable(() => import('@/features/fork/Activity'), lazyLoadFallback);
+const { Stats } = loadable(() => import('@/features/fork/Stats'), lazyLoadFallback);
 
 // This fork's loopback server is always local and account-free. Initialize the
 // inherited request queue explicitly without mounting Manatan's login guard.
@@ -48,6 +48,17 @@ const ScrollToTop = () => {
     useLayoutEffect(() => {
         window.scrollTo(0, 0);
     }, [pathname]);
+    return null;
+};
+
+// One-time: make the inherited reader default to right-to-left paged manga reading and carry
+// over choices made in the earlier fork-only reader preferences.
+const MangakiReaderDefaults = () => {
+    useEffect(() => {
+        import('@/features/fork/ReaderDefaults')
+            .then(({ applyMangakiReaderDefaults }) => applyMangakiReaderDefaults())
+            .catch(() => undefined);
+    }, []);
     return null;
 };
 
@@ -116,6 +127,7 @@ export const App: React.FC = () => (
         <OCRProvider>
             <SourceOnboarding />
             <BackgroundJobBridge />
+            <MangakiReaderDefaults />
             <OCRManager />
             <Routes>
                 <Route path="/fork/reader/:volumeId" element={<Reader forkMode />} />

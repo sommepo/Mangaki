@@ -16,20 +16,54 @@ import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { TouchEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { TouchEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ForkApi, ForkSeries } from '@/features/fork/ForkApi';
+import { ForkApi, ForkSeries, ForkVolume } from '@/features/fork/ForkApi';
 import { useForkState } from '@/features/fork/useForkState';
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle';
 import { ForkProgress } from '@/features/fork/components/ForkProgress';
 import { ForkSelectionBar } from '@/features/fork/components/ForkSelectionBar';
 import { useOCR } from '@/Manatan/context/OCRContext';
+import { useBackDismiss } from '@/features/fork/useBackDismiss';
 
 const FILTER_KEY = 'manga_reader_library_filter_v1';
 const SORT_KEY = 'manga_reader_library_sort_v1';
 const SOURCE_KEY = 'manga_reader_library_source_v1';
 const READING_KEY = 'manga_reader_library_reading_v1';
 const CATEGORY_KEY = 'manga_reader_library_category_v1';
+const SCROLL_KEY = 'manga_reader_library_scroll_v1';
+
+const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+
+const readScroll = () => {
+    try {
+        return Number(sessionStorage.getItem(SCROLL_KEY)) || 0;
+    } catch {
+        return 0;
+    }
+};
+
+type LibraryEntry = {
+    item: ForkSeries;
+    cover?: ForkVolume;
+    /** Sum of saved page indexes, as used by the progress sort. */
+    progress: number;
+    /** Readable page-index span (pageCount - 1 per readable volume). */
+    readable: number;
+};
+
+const toEntry = (item: ForkSeries): LibraryEntry => {
+    let progress = 0;
+    let readable = 0;
+    let cover: ForkVolume | undefined;
+    item.volumes.forEach((volume) => {
+        if (volume.pageCount <= 0 || volume.error) return;
+        cover ??= volume;
+        progress += Math.min(volume.progressPage, volume.pageCount - 1);
+        readable += volume.pageCount - 1;
+    });
+    return { item, cover, progress, readable };
+};
 
 export function Library() {
     useAppTitle('Manga', 'Manga');
@@ -51,22 +85,74 @@ export function Library() {
     const [filtersOpen, setFiltersOpen] = useState(false);
     const [actionStatus, setActionStatus] = useState<string>();
     const [refreshingFolders, setRefreshingFolders] = useState(false);
-    const pullStartY = useRef<number>();
+    const pullStartY = useRef<number | undefined>(undefined);
+    const latestLoad = useRef(0);
 
-    const load = async (showSpinner = true) => {
+    const load = useCallback(async (showSpinner = true) => {
+        latestLoad.current += 1;
+        const loadId = latestLoad.current;
         if (showSpinner) setLoading(true);
         try {
-            setSeries(await ForkApi.catalogue());
+            const catalogue = await ForkApi.catalogue();
+            // A slower, older response must not replace a newer catalogue (e.g. after Mark NSFW).
+            if (loadId !== latestLoad.current) return;
+            setSeries(catalogue);
             setError(undefined);
         } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause));
+            if (loadId === latestLoad.current) setError(messageOf(cause));
         } finally {
-            setLoading(false);
+            if (loadId === latestLoad.current) setLoading(false);
         }
-    };
+    }, []);
+    // The server applies the NSFW visibility to /catalogue and every visibility change invalidates
+    // the cache, so one revalidation per visit is enough (the old effect also refetched when the
+    // unrelated /state request completed).
     useEffect(() => {
         load(!ForkApi.cachedCatalogue());
-    }, [state?.showSensitive]);
+        return () => {
+            latestLoad.current += 1;
+        };
+    }, [load]);
+
+    // Remember the grid position across opening a series and coming back (brief §4).
+    const scrollRestored = useRef(false);
+    const scrollTracking = useRef(false);
+    // Layout cleanup runs before the next route's ScrollToTop, so its scroll-to-0 is never saved.
+    useLayoutEffect(() => {
+        scrollTracking.current = true;
+        return () => {
+            scrollTracking.current = false;
+        };
+    }, []);
+    useLayoutEffect(() => {
+        if (scrollRestored.current || loading || series.length === 0) return;
+        scrollRestored.current = true;
+        const saved = readScroll();
+        if (saved > 0) window.scrollTo(0, saved);
+    }, [loading, series.length]);
+    useEffect(() => {
+        let frame: number | undefined;
+        const save = () => {
+            if (!scrollRestored.current || !scrollTracking.current) return;
+            try {
+                sessionStorage.setItem(SCROLL_KEY, String(Math.round(window.scrollY)));
+            } catch {
+                // Position memory is a convenience only.
+            }
+        };
+        const onScroll = () => {
+            if (frame !== undefined) return;
+            frame = window.requestAnimationFrame(() => {
+                frame = undefined;
+                save();
+            });
+        };
+        window.addEventListener('scroll', onScroll, { passive: true });
+        return () => {
+            window.removeEventListener('scroll', onScroll);
+            if (frame !== undefined) window.cancelAnimationFrame(frame);
+        };
+    }, []);
     const refreshLocalFolders = async () => {
         if (refreshingFolders) return;
         const localSources = state?.sources.filter((source) => source.kind === 'local') ?? [];
@@ -86,7 +172,7 @@ export function Library() {
                     : `Added ${newVolumes} new volume${newVolumes === 1 ? '' : 's'}${newSeries ? ` across ${newSeries} new series` : ''}.`,
             );
         } catch (cause) {
-            setActionStatus(cause instanceof Error ? cause.message : String(cause));
+            setActionStatus(messageOf(cause));
         } finally {
             setRefreshingFolders(false);
         }
@@ -101,36 +187,37 @@ export function Library() {
             void refreshLocalFolders();
         }
     };
+    // Per-series totals are computed once per catalogue instead of in every filter pass,
+    // sort comparison and grid render.
+    const entries = useMemo(() => series.map(toEntry), [series]);
+    const collator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), []);
     const filtered = useMemo(() => {
         const needle = query.trim().toLocaleLowerCase();
-        const result = series.filter((item) => {
+        const result = entries.filter(({ item, progress, readable }) => {
             if (needle && !item.title.toLocaleLowerCase().includes(needle)) return false;
             if (sourceFilter !== 'all' && item.sourceId !== sourceFilter) return false;
             if (categoryFilter !== 'all' && !item.categoryIds.includes(categoryFilter)) return false;
-            const pages = item.volumes.reduce((count, volume) => count + volume.pageCount, 0);
-            const progress = item.volumes.reduce((count, volume) => count + volume.progressPage, 0);
             if (readingFilter === 'unread' && progress > 0) return false;
-            if (readingFilter === 'reading' && (progress === 0 || progress >= Math.max(0, pages - item.volumes.length)))
-                return false;
-            if (readingFilter === 'complete' && progress < Math.max(0, pages - item.volumes.length)) return false;
+            if (readingFilter === 'reading' && (progress === 0 || progress >= readable)) return false;
+            if (readingFilter === 'complete' && (readable === 0 || progress < readable)) return false;
             return true;
         });
         result.sort((left, right) => {
-            if (sort === 'progress') {
-                const progress = (item: ForkSeries) =>
-                    item.volumes.reduce((count, volume) => count + volume.progressPage, 0);
-                return progress(right) - progress(left);
-            }
-            if (sort === 'volumes') return right.volumes.length - left.volumes.length;
-            return left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' });
+            if (sort === 'progress') return right.progress - left.progress;
+            if (sort === 'volumes') return right.item.volumes.length - left.item.volumes.length;
+            return collator.compare(left.item.title, right.item.title);
         });
         return result;
-    }, [categoryFilter, query, readingFilter, series, sort, sourceFilter]);
+    }, [categoryFilter, collator, entries, query, readingFilter, sort, sourceFilter]);
     const toggle = (id: string) =>
         setSelected((old) => (old.includes(id) ? old.filter((value) => value !== id) : [...old, id]));
     const leaveSelection = () => {
         setSelected([]);
         setSelecting(false);
+    };
+    useBackDismiss(selecting, leaveSelection);
+    const run = (work: () => Promise<unknown>) => {
+        work().catch((cause) => setActionStatus(messageOf(cause)));
     };
     const prepareSelected = (reprocess: boolean) => {
         const selectedItems = series.filter((item) => selected.includes(item.id));
@@ -150,12 +237,12 @@ export function Library() {
                 })
                     .then(async (job) => {
                         setActionStatus(
-                            `Queued ${job.totalPages ?? 0} pages for ${reprocess ? 'fresh recognition' : 'OCR'}. Progress is available in Settings → Background activity.`,
+                            `Queued ${job.totalPages ?? 0} pages for ${reprocess ? 'fresh recognition' : 'OCR'}. Progress is shown in Activity.`,
                         );
                         setSelected([]);
-                        await load();
+                        await load(false);
                     })
-                    .catch((cause) => setActionStatus(cause instanceof Error ? cause.message : String(cause)));
+                    .catch((cause) => setActionStatus(messageOf(cause)));
             },
         );
     };
@@ -173,13 +260,11 @@ export function Library() {
         showConfirm('Make available offline?', `${remoteItems.length} remote series · ${pages} pages`, () => {
             ForkApi.downloadSeries(remoteItems.map((item) => item.id))
                 .then(async (job) => {
-                    setActionStatus(
-                        `Queued ${job.totalPages ?? 0} pages. Progress is available in Settings → Background activity.`,
-                    );
+                    setActionStatus(`Queued ${job.totalPages ?? 0} pages. Progress is shown in Activity.`);
                     setSelected([]);
-                    await load();
+                    await load(false);
                 })
-                .catch((cause) => setActionStatus(cause instanceof Error ? cause.message : String(cause)));
+                .catch((cause) => setActionStatus(messageOf(cause)));
         });
     };
 
@@ -339,36 +424,48 @@ export function Library() {
                     <Button
                         color="inherit"
                         disabled={!selectedCategory}
-                        onClick={() => ForkApi.setSeriesCategory(selected, selectedCategory, true).then(() => load())}
+                        onClick={() =>
+                            run(async () => {
+                                await ForkApi.setSeriesCategory(selected, selectedCategory, true);
+                                await load(false);
+                            })
+                        }
                     >
                         Add shelf
                     </Button>
                     <Button
                         color="inherit"
                         onClick={() =>
-                            ForkApi.setSeriesSensitive(selected, true).then(() => {
+                            run(async () => {
+                                await ForkApi.setSeriesSensitive(selected, true);
                                 setSelected([]);
-                                return load();
+                                await load(false);
                             })
                         }
                     >
-                        Mark hidden
+                        Mark NSFW
                     </Button>
                     <Button
                         color="inherit"
                         onClick={() =>
-                            ForkApi.setSeriesSensitive(selected, false).then(() => {
+                            run(async () => {
+                                await ForkApi.setSeriesSensitive(selected, false);
                                 setSelected([]);
-                                return load();
+                                await load(false);
                             })
                         }
                     >
-                        Remove hidden
+                        Remove NSFW
                     </Button>
                     <Button
                         color="inherit"
                         disabled={!selectedCategory}
-                        onClick={() => ForkApi.setSeriesCategory(selected, selectedCategory, false).then(() => load())}
+                        onClick={() =>
+                            run(async () => {
+                                await ForkApi.setSeriesCategory(selected, selectedCategory, false);
+                                await load(false);
+                            })
+                        }
                     >
                         Remove shelf
                     </Button>
@@ -408,13 +505,7 @@ export function Library() {
                     rowGap: 2.5,
                 }}
             >
-                {filtered.map((item) => {
-                    const firstVolume = item.volumes.find((volume) => volume.pageCount > 0 && !volume.error);
-                    const readablePages = item.volumes.reduce(
-                        (total, volume) => total + Math.max(0, volume.pageCount - 1),
-                        0,
-                    );
-                    const readPages = item.volumes.reduce((total, volume) => total + volume.progressPage, 0);
+                {filtered.map(({ item, cover: firstVolume, progress: readPages, readable: readablePages }) => {
                     const isSelected = selected.includes(item.id);
                     return (
                         <Card
@@ -440,8 +531,14 @@ export function Library() {
                                 >
                                     <Box
                                         component="img"
-                                        src={firstVolume ? `/api/fork/volumes/${firstVolume.id}/pages/0` : undefined}
+                                        src={
+                                            firstVolume
+                                                ? `/api/fork/volumes/${encodeURIComponent(firstVolume.id)}/thumbnail?fingerprint=${encodeURIComponent(firstVolume.fingerprint)}`
+                                                : undefined
+                                        }
                                         alt=""
+                                        loading="lazy"
+                                        decoding="async"
                                         sx={{
                                             width: '100%',
                                             aspectRatio: '2 / 3',

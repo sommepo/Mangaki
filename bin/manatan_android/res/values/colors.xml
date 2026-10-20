@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="mangaki_icon_background">#000000</color>
+    <!-- Page surface and system-bar background; black in values-night. -->
+    <color name="mangaki_surface">#FFFFFF</color>
 </resources>

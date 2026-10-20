@@ -149,10 +149,12 @@ impl AppState {
             warn!("Failed to get DB connection for has_cache_entry_prefix");
             return false;
         };
-        let like_pattern = format!("{prefix}%");
+        // A range scan uses the primary-key index (LIKE cannot, and would also treat `_`/`%`
+        // inside page URLs as wildcards).
+        let (start, end) = prefix_bounds(prefix);
         conn.query_row(
-            "SELECT 1 FROM ocr_cache WHERE cache_key LIKE ? LIMIT 1",
-            params![like_pattern],
+            "SELECT 1 FROM ocr_cache WHERE cache_key >= ? AND cache_key < ? LIMIT 1",
+            params![start, end],
             |_| Ok(()),
         )
         .optional()
@@ -199,12 +201,12 @@ impl AppState {
                 |row| {
                     let context: String = row.get(0)?;
                     let data_blob: Vec<u8> = row.get(1)?;
-                    let data = serde_json::from_slice(&data_blob).unwrap_or_default();
-                    Ok(CacheEntry { context, data })
+                    Ok((context, data_blob))
                 },
             )
             .optional()
-            .unwrap_or(None);
+            .unwrap_or(None)
+            .and_then(|(context, data_blob)| decode_cache_entry(cache_key, context, &data_blob));
 
         if entry.is_some() {
             let now = now_unix();
@@ -228,23 +230,27 @@ impl AppState {
             return None;
         };
 
-        let like_q = format!("{cache_key}?sourceId=%");
-        let like_amp = format!("{cache_key}&sourceId=%");
+        let (q_start, q_end) = prefix_bounds(&format!("{cache_key}?sourceId="));
+        let (amp_start, amp_end) = prefix_bounds(&format!("{cache_key}&sourceId="));
 
         let row = conn
             .query_row(
-                "SELECT cache_key, context, data FROM ocr_cache WHERE cache_key LIKE ? OR cache_key LIKE ? LIMIT 1",
-                params![like_q, like_amp],
+                "SELECT cache_key, context, data FROM ocr_cache
+                 WHERE (cache_key >= ?1 AND cache_key < ?2) OR (cache_key >= ?3 AND cache_key < ?4)
+                 LIMIT 1",
+                params![q_start, q_end, amp_start, amp_end],
                 |row| {
                     let key: String = row.get(0)?;
                     let context: String = row.get(1)?;
                     let data_blob: Vec<u8> = row.get(2)?;
-                    let data = serde_json::from_slice(&data_blob).unwrap_or_default();
-                    Ok((key, CacheEntry { context, data }))
+                    Ok((key, context, data_blob))
                 },
             )
             .optional()
-            .unwrap_or(None);
+            .unwrap_or(None)
+            .and_then(|(key, context, data_blob)| {
+                decode_cache_entry(&key, context, &data_blob).map(|entry| (key, entry))
+            });
 
         if let Some((ref key, _)) = row {
             let now = now_unix();
@@ -363,13 +369,15 @@ impl AppState {
             for cache_key in cache_keys {
                 // Delete exact cache_key plus common variants that include sourceId query params.
                 // This mirrors the prefix matching used in chapter_status().
-                let like_q = format!("{cache_key}?sourceId=%");
-                let like_amp = format!("{cache_key}&sourceId=%");
+                let (q_start, q_end) = prefix_bounds(&format!("{cache_key}?sourceId="));
+                let (amp_start, amp_end) = prefix_bounds(&format!("{cache_key}&sourceId="));
 
                 let deleted = tx
                     .execute(
-                        "DELETE FROM ocr_cache WHERE cache_key = ? OR cache_key LIKE ? OR cache_key LIKE ?",
-                        params![cache_key, like_q, like_amp],
+                        "DELETE FROM ocr_cache WHERE cache_key = ?1
+                            OR (cache_key >= ?2 AND cache_key < ?3)
+                            OR (cache_key >= ?4 AND cache_key < ?5)",
+                        params![cache_key, q_start, q_end, amp_start, amp_end],
                     )
                     .unwrap_or(0);
                 ocr_cache_rows += deleted as usize;
@@ -538,6 +546,36 @@ impl AppState {
     }
 }
 
+/// Decode a stored OCR payload. A corrupt payload is treated as a cache miss (so the page is
+/// recognised again) rather than as a successfully processed page with no text.
+fn decode_cache_entry(cache_key: &str, context: String, data_blob: &[u8]) -> Option<CacheEntry> {
+    match serde_json::from_slice(data_blob) {
+        Ok(data) => Some(CacheEntry { context, data }),
+        Err(err) => {
+            warn!("Ignoring corrupt OCR cache entry {cache_key}: {err}");
+            None
+        }
+    }
+}
+
+/// Half-open `[start, end)` key range covering every string that starts with `prefix`.
+fn prefix_bounds(prefix: &str) -> (String, String) {
+    let mut end: Vec<char> = prefix.chars().collect();
+    while let Some(last) = end.pop() {
+        let mut next = last as u32 + 1;
+        // Skip the UTF-16 surrogate range, which has no `char` values.
+        if (0xD800..=0xDFFF).contains(&next) {
+            next = 0xE000;
+        }
+        if let Some(next) = char::from_u32(next) {
+            end.push(next);
+            return (prefix.to_string(), end.into_iter().collect());
+        }
+    }
+    // Empty prefix (or all chars at char::MAX): everything sorts at or after it.
+    (prefix.to_string(), char::MAX.to_string().repeat(4))
+}
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -620,5 +658,30 @@ fn migrate_legacy_cache(conn: &mut rusqlite::Connection, cache_dir: &Path) {
     if tx.commit().is_ok() {
         let _ = std::fs::remove_file(&cache_path);
         info!("Migrated {} legacy OCR cache entries into SQLite", imported);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefix_bounds;
+
+    #[test]
+    fn prefix_bounds_cover_exactly_the_prefix() {
+        let (start, end) = prefix_bounds("lang/japanese/page/1?sourceId=");
+        assert_eq!(start, "lang/japanese/page/1?sourceId=");
+        assert_eq!(end, "lang/japanese/page/1?sourceId>");
+        for key in ["lang/japanese/page/1?sourceId=", "lang/japanese/page/1?sourceId=42"] {
+            assert!(key >= start.as_str() && key < end.as_str(), "{key} should match");
+        }
+        for key in ["lang/japanese/page/1", "lang/japanese/page/10?sourceId=1", "lang/japanese/page/1?sourceIdX"] {
+            assert!(!(key >= start.as_str() && key < end.as_str()), "{key} should not match");
+        }
+    }
+
+    #[test]
+    fn prefix_bounds_treat_like_wildcards_literally() {
+        let (start, end) = prefix_bounds("vol_1%/p?sourceId=");
+        let other = "volX1Y/p?sourceId=1";
+        assert!(!(other >= start.as_str() && other < end.as_str()));
     }
 }

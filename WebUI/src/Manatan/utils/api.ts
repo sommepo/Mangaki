@@ -1,4 +1,4 @@
-import { DictionaryResult, LookupResponse, YomitanLanguage } from '../types';
+import { LookupResponse, YomitanLanguage } from '../types';
 import { isNoSpaceLanguage } from '@/Manatan/utils/language';
 import { ForkApi } from '@/features/fork/ForkApi';
 
@@ -79,30 +79,49 @@ export const apiRequest = async <T>(
 
 // --- YOMITAN API ---
 
+// Identical lookups issued while one is still in flight (double taps, popup re-renders,
+// furigana generation re-scanning the same sentence) share a single request.
+const inFlightLookups = new Map<string, Promise<LookupResponse | 'loading'>>();
+
 export const lookupYomitan = async (
-    text: string, 
-    index: number = 0, 
+    text: string,
+    index: number = 0,
     groupingMode: 'grouped' | 'flat' = 'grouped',
-    language?: YomitanLanguage
+    language?: YomitanLanguage,
+    options: { recordEvent?: boolean } = {},
 ): Promise<LookupResponse | 'loading'> => {
-    try {
-        // Convert dropdown value to backend boolean
-        const groupParam = groupingMode === 'grouped';
-        const languageParam = language ? `&language=${encodeURIComponent(language)}` : '';
-        const url = `/api/yomitan/lookup?text=${encodeURIComponent(text)}&index=${index}&group=${groupParam}${languageParam}`;
-        const res = await apiRequest<any>(url);
-        
-        if (res && res.error === 'loading') return 'loading';
-        if (res && res.terms) {
-            if (res.terms.length > 0 || res.kanji?.length > 0) ForkApi.recordEvent('dictionary_lookup').catch(() => undefined);
-            return res as LookupResponse;
-        }
-        
-        return { terms: [], kanji: [] };
-    } catch (e) {
-        console.error("Lookup failed:", e);
-        return { terms: [], kanji: [] };
+    // Convert dropdown value to backend boolean
+    const groupParam = groupingMode === 'grouped';
+    const languageParam = language ? `&language=${encodeURIComponent(language)}` : '';
+    const url = `/api/yomitan/lookup?text=${encodeURIComponent(text)}&index=${index}&group=${groupParam}${languageParam}`;
+
+    let request = inFlightLookups.get(url);
+    if (!request) {
+        request = (async (): Promise<LookupResponse | 'loading'> => {
+            try {
+                const res = await apiRequest<any>(url);
+                if (res && res.error === 'loading') return 'loading';
+                if (res && res.terms) return res as LookupResponse;
+                return { terms: [], kanji: [] };
+            } catch (e) {
+                console.error('Lookup failed:', e);
+                return { terms: [], kanji: [] };
+            } finally {
+                inFlightLookups.delete(url);
+            }
+        })();
+        inFlightLookups.set(url, request);
     }
+
+    const result = await request;
+    if (
+        options.recordEvent !== false &&
+        result !== 'loading' &&
+        (result.terms.length > 0 || (result.kanji?.length ?? 0) > 0)
+    ) {
+        ForkApi.recordEvent('dictionary_lookup').catch(() => undefined);
+    }
+    return result;
 };
 
 export const getDictionaries = async (): Promise<DictionaryMeta[] | null> => {

@@ -82,6 +82,27 @@ interface OCRContextType {
 
 const OCRContext = createContext<OCRContextType | undefined>(undefined);
 
+/**
+ * Narrow slice of the OCR context consumed by every OCR text box. It deliberately excludes
+ * values that change while pages load (OCR cache/status maps, dialogs, debug log, full popup
+ * results) so that dozens of mounted text boxes do not all re-render on every OCR response.
+ */
+export interface OCRTextBoxContextType {
+    settings: Settings;
+    setSettings: React.Dispatch<React.SetStateAction<Settings>>;
+    mergeAnchor: MergeState;
+    setMergeAnchor: React.Dispatch<React.SetStateAction<MergeState>>;
+    setDictPopup: React.Dispatch<React.SetStateAction<DictPopupState>>;
+    dictPopupVisible: boolean;
+    dictPopupHighlight: DictPopupState['highlight'];
+    wasPopupClosedRecently: () => boolean;
+    showDialog: (config: Partial<DialogState>) => void;
+    showProgress: (message: string) => void;
+    closeDialog: () => void;
+}
+
+const OCRTextBoxContext = createContext<OCRTextBoxContextType | undefined>(undefined);
+
 const LEGACY_MANATAN_SETTINGS_KEY = 'mangatan_settings_v3';
 
 const isMobileUserAgent = (): boolean => {
@@ -229,6 +250,7 @@ export const OCRProvider = ({ children }: { children: ReactNode }) => {
         x: 0,
         y: 0,
         results: [],
+        kanjiResults: [],
         isLoading: false,
         systemLoading: false,
     });
@@ -605,11 +627,47 @@ export const OCRProvider = ({ children }: { children: ReactNode }) => {
         ],
     );
 
-    return <OCRContext.Provider value={contextValue}>{children}</OCRContext.Provider>;
+    const textBoxContextValue = useMemo<OCRTextBoxContextType>(
+        () => ({
+            settings,
+            setSettings,
+            mergeAnchor,
+            setMergeAnchor,
+            setDictPopup,
+            dictPopupVisible: dictPopup.visible,
+            dictPopupHighlight: dictPopup.highlight,
+            wasPopupClosedRecently,
+            showDialog,
+            showProgress,
+            closeDialog,
+        }),
+        [
+            settings,
+            mergeAnchor,
+            dictPopup.visible,
+            dictPopup.highlight,
+            wasPopupClosedRecently,
+            showDialog,
+            showProgress,
+            closeDialog,
+        ],
+    );
+
+    return (
+        <OCRContext.Provider value={contextValue}>
+            <OCRTextBoxContext.Provider value={textBoxContextValue}>{children}</OCRTextBoxContext.Provider>
+        </OCRContext.Provider>
+    );
 };
 
 export const useOCR = () => {
     const context = useContext(OCRContext);
     if (!context) throw new Error('useOCR must be used within OCRProvider');
+    return context;
+};
+
+export const useOCRTextBox = () => {
+    const context = useContext(OCRTextBoxContext);
+    if (!context) throw new Error('useOCRTextBox must be used within OCRProvider');
     return context;
 };

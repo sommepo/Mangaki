@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, LazyLock, Mutex, atomic::Ordering},
 };
 
 use axum::{
@@ -18,6 +18,41 @@ use crate::{
     logic,
     state::{AppState, CacheEntry},
 };
+
+/// Per-cache-key locks for recognitions in progress. The reader, its neighbouring-page
+/// overlays and a background "Prepare OCR" job can all ask for the same page at once; only the
+/// first should run the engine, the rest wait and are served from the cache it writes.
+static IN_FLIGHT_OCR: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct InFlightEntry {
+    key: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl InFlightEntry {
+    fn acquire(key: &str) -> Self {
+        let mut map = IN_FLIGHT_OCR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = map
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        Self {
+            key: key.to_string(),
+            lock,
+        }
+    }
+}
+
+impl Drop for InFlightEntry {
+    fn drop(&mut self) {
+        let mut map = IN_FLIGHT_OCR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // One reference is held by the map and one by `self`; anything more is a waiter.
+        if Arc::strong_count(&self.lock) <= 2 {
+            map.remove(&self.key);
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct OcrRequest {
@@ -136,6 +171,21 @@ pub async fn ocr_handler(
     if params.cache_only {
         return Err((StatusCode::NOT_FOUND, "OCR cache entry not found".to_string()));
     }
+
+    let in_flight = InFlightEntry::acquire(&cache_key);
+    let _recognition_permit = in_flight.lock.clone().lock_owned().await;
+    // Another request may have finished recognising this page while we waited.
+    if !params.refresh
+        && let Some(entry) = state.get_cache_entry(&cache_key)
+    {
+        info!("OCR Handler: Cache HIT after waiting for cache_key={}", cache_key);
+        if let Some(chapter_key) = chapter_key.as_deref() {
+            state.insert_chapter_cache(chapter_key, &cache_key);
+        }
+        state.requests_processed.fetch_add(1, Ordering::Relaxed);
+        return Ok(Json(entry.data));
+    }
+
     info!(
         "OCR Handler: Cache MISS for cache_key={}. Starting processing.",
         cache_key

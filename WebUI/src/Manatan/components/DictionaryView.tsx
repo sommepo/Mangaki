@@ -2,7 +2,14 @@ import React, { useState, useMemo, useCallback, useLayoutEffect, useRef } from '
 import { createPortal } from 'react-dom';
 import { useTheme } from '@mui/material/styles';
 import { useOCR } from '@/Manatan/context/OCRContext';
-import { findNotes, addNote, guiBrowse, imageUrlToBase64Webp, logAnkiError } from '@/Manatan/utils/anki';
+import {
+    findNotes,
+    addNote,
+    guiBrowse,
+    imageUrlToBase64Webp,
+    logAnkiError,
+    escapeAnkiSearchText,
+} from '@/Manatan/utils/anki';
 import { lookupYomitan } from '@/Manatan/utils/api';
 import { buildSentenceFuriganaFromLookup } from '@/Manatan/utils/japaneseFurigana';
 import {
@@ -365,6 +372,8 @@ const splitTagString = (tag: string): string[] =>
 const normalizeTagList = (tags: string[]): string[] =>
     tags.flatMap((tag) => splitTagString(tag));
 
+const WORD_AUDIO_MINING_TIMEOUT_MS = 6000;
+
 const AnkiButtons: React.FC<{
     entry: DictionaryResult;
     wordAudioSelection: WordAudioSourceSelection;
@@ -378,33 +387,44 @@ const AnkiButtons: React.FC<{
     const targetField = useMemo(() => {
         return Object.keys(settings.ankiFieldMap || {}).find(key => settings.ankiFieldMap?.[key] === 'Target Word');
     }, [settings.ankiFieldMap]);
+    // Duplicate checks are async; a slower response for a previously shown entry must not set the
+    // status/note id for the current one (an "overwrite" would otherwise update the wrong note).
+    const checkGenerationRef = useRef(0);
 
     const checkStatus = async () => {
-        if (!settings.ankiConnectEnabled || !settings.ankiCheckDuplicates) return;
+        checkGenerationRef.current += 1;
+        const generation = checkGenerationRef.current;
+        if (!settings.ankiConnectEnabled || !settings.ankiCheckDuplicates) {
+            setStatus('missing');
+            setExistingNoteId(null);
+            return;
+        }
         try {
             const url = settings.ankiConnectUrl || 'http://127.0.0.1:18765';
             const scope = settings.ankiDuplicateScope || 'deck';
 
             const queryParts = [];
             if (scope === 'deck' && settings.ankiDeck) {
-                queryParts.push(`deck:"${settings.ankiDeck}"`);
+                queryParts.push(`"deck:${escapeAnkiSearchText(settings.ankiDeck)}"`);
             } else if (scope === 'deck-root' && settings.ankiDeck) {
+                // `deck:Root` already includes its subdecks in Anki search.
                 const rootDeck = settings.ankiDeck.split('::')[0];
-                queryParts.push(`deck:"${rootDeck}::*"`);
+                queryParts.push(`"deck:${escapeAnkiSearchText(rootDeck)}"`);
             }
 
             if (!settings.ankiCheckDuplicatesAllModels && settings.ankiModel) {
-                queryParts.push(`note:"${settings.ankiModel}"`);
+                queryParts.push(`"note:${escapeAnkiSearchText(settings.ankiModel)}"`);
             }
 
             if (targetField) {
-                queryParts.push(`"${targetField}:${entry.headword}"`);
+                queryParts.push(`"${escapeAnkiSearchText(targetField)}:${escapeAnkiSearchText(entry.headword)}"`);
             } else {
-                queryParts.push(`"${entry.headword}"`);
+                queryParts.push(`"${escapeAnkiSearchText(entry.headword)}"`);
             }
 
             const query = queryParts.join(' ');
             const ids = await findNotes(url, query);
+            if (generation !== checkGenerationRef.current) return;
             if (ids.length > 0) {
                 setStatus('exists');
                 setExistingNoteId(ids[0]);
@@ -413,6 +433,7 @@ const AnkiButtons: React.FC<{
                 setExistingNoteId(null);
             }
         } catch (e) {
+            if (generation !== checkGenerationRef.current) return;
             logAnkiError("Anki check failed", e);
             setStatus('unknown'); 
         }
@@ -421,16 +442,24 @@ const AnkiButtons: React.FC<{
     React.useEffect(() => {
         if (settings.ankiCheckDuplicates) {
             setStatus('loading');
+            setExistingNoteId(null);
             checkStatus();
         } else {
+            checkGenerationRef.current += 1;
             setStatus('missing'); 
+            setExistingNoteId(null);
         }
+        return () => {
+            checkGenerationRef.current += 1;
+        };
     }, [
         entry.headword,
         settings.ankiCheckDuplicates,
         settings.ankiDuplicateScope,
         settings.ankiCheckDuplicatesAllModels,
         settings.ankiDeck,
+        settings.ankiModel,
+        settings.ankiConnectUrl,
         targetField
     ]);
 
@@ -501,6 +530,13 @@ const AnkiButtons: React.FC<{
         };
 
         const VOID_TAGS_HTML = ['br', 'img', 'hr', 'input', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr'];
+        // Dictionary text is untrusted data: escape it so "<" etc. cannot break or inject card markup.
+        const escapeHtml = (value: string): string =>
+            value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        // Yomitan structured-content element names (plus p/hr used by some dictionaries).
+        const STRUCTURED_CONTENT_TAGS = new Set(
+            'br ruby rt rp table thead tbody tfoot tr td th span div ol ul li details summary img a p hr'.split(' '),
+        );
 
         const generateElementHTML = (
             node: any,
@@ -508,12 +544,16 @@ const AnkiButtons: React.FC<{
             glossaryDictionaryName?: string,
         ): string => {
             const { tag, content, data, href } = node;
+            if (typeof tag !== 'string' || !STRUCTURED_CONTENT_TAGS.has(tag)) {
+                // Unknown/unsafe tags (e.g. script, iframe) from an untrusted dictionary: keep text only.
+                return generateHTML(content, glossaryDictionaryName);
+            }
             const config = HTML_ELEMENT_CONFIG[tag] || {};
 
             const yomitanClass = `gloss-sc-${tag}`;
             const dictClass = data?.class || '';
             const classStr = [yomitanClass, dictClass].filter(Boolean).join(' ');
-            const classAttr = classStr ? ` class="${classStr}"` : '';
+            const classAttr = classStr ? ` class="${escapeHtml(String(classStr))}"` : '';
 
             const classNames = typeof data?.class === 'string' ? data.class.split(/\s+/) : [];
             const isTagClass = classNames.includes('tag');
@@ -524,14 +564,15 @@ const AnkiButtons: React.FC<{
             const dataAttrs = data && typeof data === 'object'
                 ? Object.entries(data).map(([key, value]) => {
                     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-                        return `data-sc-${key}="${String(value).replace(/"/g, '&quot;')}"`;
+                        if (!/^[A-Za-z0-9_-]+$/.test(key)) return '';
+                        return `data-sc-${key}="${escapeHtml(String(value))}"`;
                     }
                     return '';
                 }).filter(Boolean).join(' ')
                 : '';
 
             const finalStyle = `${config.baseStyle || ''}${tagClassStyle}${dictStyle}`;
-            const styleAttr = finalStyle ? ` style="${finalStyle}"` : '';
+            const styleAttr = finalStyle ? ` style="${escapeHtml(finalStyle)}"` : '';
 
             if (config.void || VOID_TAGS_HTML.includes(tag)) {
                 if (tag === 'img') {
@@ -540,14 +581,15 @@ const AnkiButtons: React.FC<{
                         ? `/api/yomitan/dict-media/${encodeURIComponent(glossaryDictionaryName)}/${rawPath}`
                         : rawPath;
                     const alt = node.alt || '';
-                    return `<img src="${src}" alt="${alt}"${styleAttr} ${dataAttrs}${classAttr} />`;
+                    return `<img src="${escapeHtml(String(src))}" alt="${escapeHtml(String(alt))}"${styleAttr} ${dataAttrs}${classAttr} />`;
                 }
                 if (tag === 'br') return '<br />';
                 return `<${tag}${styleAttr} ${dataAttrs}${classAttr} />`;
             }
 
             if (tag === 'a') {
-                return `<a href="${href}" target="_blank" style="text-decoration: underline;${dictStyle}" ${dataAttrs}${classAttr}>${generateHTML(content, glossaryDictionaryName)}</a>`;
+                const safeHref = /^\s*(javascript|vbscript|data):/i.test(String(href ?? '')) ? '#' : String(href ?? '');
+                return `<a href="${escapeHtml(safeHref)}" target="_blank" style="text-decoration: underline;${escapeHtml(dictStyle)}" ${dataAttrs}${classAttr}>${generateHTML(content, glossaryDictionaryName)}</a>`;
             }
 
             if (tag === 'table') {
@@ -571,7 +613,7 @@ const AnkiButtons: React.FC<{
 
         const generateHTML = (node: any, glossaryDictionaryName?: string): string => {
             if (node === null || node === undefined) return '';
-            if (typeof node === 'string' || typeof node === 'number') return String(node);
+            if (typeof node === 'string' || typeof node === 'number') return escapeHtml(String(node));
             if (Array.isArray(node)) return node.map((part) => generateHTML(part, glossaryDictionaryName)).join('');
             if (node.type === 'structured-content') return generateHTML(node.content, glossaryDictionaryName);
             if (node?.data?.content === 'attribution') return '';
@@ -628,16 +670,16 @@ const AnkiButtons: React.FC<{
             if (!glossaryEntries.length) return '';
             return glossaryEntries.map((def, idx) => {
                 const tagsHTML = normalizeTagList(def.tags).map((t) =>
-                    `<span style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${t}</span>`
+                    `<span style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${escapeHtml(t)}</span>`
                 );
-                const dictHTML = `<i>(${def.dictionaryName})</i>`;
+                const dictHTML = `<i>(${escapeHtml(def.dictionaryName)})</i>`;
                 const headerHTML = [...tagsHTML, dictHTML].join(' ');
                 const contentHTML = def.content.map((c) => {
                     try {
                         const parsed = JSON.parse(c);
                         return generateHTML(parsed, def.dictionaryName);
                     } catch {
-                        return c;
+                        return escapeHtml(c).replace(/\n/g, '<br>');
                     }
                 }).join('');
                 return `
@@ -654,17 +696,29 @@ const AnkiButtons: React.FC<{
         const sentence = dictPopup.context?.sentence || '';
         const needsSentenceFurigana = Object.values(map).includes('Sentence Furigana');
         const sentenceFurigana = needsSentenceFurigana
-            ? await buildSentenceFuriganaFromLookup(sentence, lookupYomitan, {
+            ? await buildSentenceFuriganaFromLookup(
+                sentence,
+                // Furigana generation scans the sentence word by word; those are not user lookups.
+                (text, index, grouping, language) =>
+                    lookupYomitan(text, index, grouping, language, { recordEvent: false }),
+                {
                   language: settings.yomitanLanguage,
                   groupingMode: settings.resultGroupingMode,
-              })
+                },
+            )
             : sentence;
         const wordAudioField = Object.keys(map).find((key) => map[key] === 'Word Audio');
         let wordAudioData: { url?: string; data?: string; filename: string; fields: string[] } | undefined;
         if (wordAudioField) {
             const entryKey = `${entry.headword}::${entry.reading}`;
             const audioSelection = wordAudioSelectionKey === entryKey ? wordAudioSelection : 'auto';
-            const audioInfo = await resolveWordAudioUrl(entry, settings.yomitanLanguage, audioSelection);
+            // External audio availability must not block text-only mining.
+            const audioInfo = await Promise.race([
+                resolveWordAudioUrl(entry, settings.yomitanLanguage, audioSelection).catch(() => null),
+                new Promise<null>((resolve) => {
+                    window.setTimeout(() => resolve(null), WORD_AUDIO_MINING_TIMEOUT_MS);
+                }),
+            ]);
             if (audioInfo?.url) {
                 wordAudioData = { url: audioInfo.url, filename: getWordAudioFilename(audioInfo.url), fields: [wordAudioField] };
             }
@@ -677,7 +731,12 @@ const AnkiButtons: React.FC<{
             else if (mapType === 'Definition' || mapType === 'Glossary') fields[ankiField] = buildGlossaryHtml();
             else if (mapType === 'Frequency') fields[ankiField] = getFrequency();
             else if (mapType === 'Harmonic Frequency') fields[ankiField] = getHarmonicFrequency();
-            else if (mapType === 'Pitch Accent') fields[ankiField] = getPitchAccent();
+            else if (mapType === 'Pitch Accent' || mapType === 'Pitch Accents') fields[ankiField] = getPitchAccent();
+            else if (mapType === 'Pitch Accent Positions' || mapType === 'Pitch Positions') {
+                fields[ankiField] = getPitchAccentPositions();
+            } else if (mapType === 'Pitch Accent Categories' || mapType === 'Pitch Categories') {
+                fields[ankiField] = getPitchAccentCategories();
+            }
             else if (mapType === 'Sentence') fields[ankiField] = sentence;
             else if (mapType === 'Sentence Furigana') fields[ankiField] = sentenceFurigana;
             else if (mapType === 'Word Audio') fields[ankiField] = '';
@@ -799,7 +858,10 @@ const AnkiButtons: React.FC<{
         } catch(e) { console.error(e); }
     };
     if (status === 'unknown') return null;
-    const isExists = status === 'exists';
+    // While an overwrite is running the status is 'loading' but the note still exists; keep the
+    // existing-note controls (disabled) instead of flipping to the "add" affordance mid-request.
+    const isBusy = status === 'loading';
+    const isExists = status === 'exists' || (isBusy && existingNoteId !== null);
     const action = settings.ankiDuplicateAction || 'prevent';
 
     const onCropperComplete = (b64: string) => {
@@ -816,11 +878,11 @@ const AnkiButtons: React.FC<{
             {(!isExists || action === 'add' || action === 'overwrite') && (
                 <button
                     onClick={handleAddClick}
-                    disabled={status === 'loading'}
+                    disabled={isBusy}
                     style={{
                         background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        lineHeight: 1, color: isExists && action === 'overwrite' ? '#3498db' : '#2ecc71', opacity: status === 'loading' ? 0.5 : 1, marginInlineStart: '10px'
+                        lineHeight: 1, color: isExists && action === 'overwrite' ? '#3498db' : '#2ecc71', opacity: isBusy ? 0.5 : 1, marginInlineStart: '10px'
                     }}
                     title={isExists && action === 'overwrite' ? "Overwrite in Anki" : (isExists && action === 'add' ? "Add Duplicate to Anki" : "Add to Anki")}
                 >
@@ -837,11 +899,11 @@ const AnkiButtons: React.FC<{
             {isExists && (
                 <button
                     onClick={handleOpen}
-                    disabled={status === 'loading'}
+                    disabled={isBusy}
                     style={{
                         background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        lineHeight: 1, color: '#f1c40f', opacity: status === 'loading' ? 0.5 : 1, marginInlineStart: (action === 'prevent' ? '10px' : '4px')
+                        lineHeight: 1, color: '#f1c40f', opacity: isBusy ? 0.5 : 1, marginInlineStart: (action === 'prevent' ? '10px' : '4px')
                     }}
                     title="Open in Anki"
                 >

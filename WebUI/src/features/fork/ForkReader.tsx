@@ -29,7 +29,7 @@ import {
 const BOOKMARK_KEY = 'manga_reader_bookmarks_v1';
 
 export function ForkReader() {
-    const { volumeId } = useParams();
+    const { volumeId } = useParams<{ volumeId: string }>();
     const navigate = useNavigate();
     const [catalogue, setCatalogue] = useState<ForkSeries[]>([]);
     const [page, setPage] = useState(0);
@@ -39,7 +39,7 @@ export function ForkReader() {
     const preferences = useSyncExternalStore(subscribeReaderPreferences, readReaderPreferences);
     const { ocrCache, ocrStatusMap, setDictPopup, settings } = useOCR();
     const wide = useMediaQuery('(min-width:800px)');
-    const touchStart = useRef<{ x: number; y: number }>();
+    const touchStart = useRef<{ x: number; y: number } | undefined>(undefined);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const zoomSizerRef = useRef<HTMLDivElement>(null);
     const zoomContentRef = useRef<HTMLDivElement>(null);
@@ -47,18 +47,18 @@ export function ForkReader() {
     const visibleRatios = useRef<Map<number, number>>(new Map());
     const zoomTracking = useRef(false);
     const zoomGeneration = useRef(0);
-    const zoomSettleTimer = useRef<number>();
-    const viewportSettleTimer = useRef<number>();
+    const zoomSettleTimer = useRef<number | undefined>(undefined);
+    const viewportSettleTimer = useRef<number | undefined>(undefined);
     const viewportMoving = useRef(false);
     const suppressReaderClickUntil = useRef(0);
-    const zoomAnchor = useRef<{ page: number; ratio: number }>();
+    const zoomAnchor = useRef<{ page: number; ratio: number } | undefined>(undefined);
     const initialScrollKey = useRef('');
     const initialPositionReady = useRef(false);
     const initialPositionSettling = useRef(false);
-    const resumePage = useRef<number>();
-    const initialScrollFrame = useRef<number>();
-    const initialSettleFrame = useRef<number>();
-    const initialSettleTimer = useRef<number>();
+    const resumePage = useRef<number | undefined>(undefined);
+    const initialScrollFrame = useRef<number | undefined>(undefined);
+    const initialSettleFrame = useRef<number | undefined>(undefined);
+    const initialSettleTimer = useRef<number | undefined>(undefined);
     const lastInteraction = useRef(Date.now());
     const [bookmarks, setBookmarks] = useState<string[]>(() => {
         try {

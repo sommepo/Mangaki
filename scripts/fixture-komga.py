@@ -108,7 +108,12 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         book_id = split.path[len(prefix):-len(suffix)]
-        PROGRESS[book_id] = int(payload["page"])
+        page = int(payload.get("page", 0))
+        # Komga numbers read-progress pages from 1 and rejects anything else.
+        if not 1 <= page <= PAGE_COUNT:
+            self.send_error(400)
+            return
+        PROGRESS[book_id] = page
         self.send_response(204)
         self.end_headers()
 

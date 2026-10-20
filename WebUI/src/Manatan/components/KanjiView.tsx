@@ -12,10 +12,12 @@ export interface KanjiInfo {
 }
 
 export function extractKanjiData(entry: DictionaryResult): KanjiInfo[] {
-    if (!entry.kanji || entry.kanji.length === 0) {
+    // Kanji data arrives in `LookupResponse.kanji`, not on term entries; tolerate entries that carry it.
+    const { kanji } = entry as DictionaryResult & { kanji?: KanjiInfo[] };
+    if (!kanji || kanji.length === 0) {
         return [];
     }
-    return entry.kanji;
+    return kanji;
 }
 
 const CSS = `

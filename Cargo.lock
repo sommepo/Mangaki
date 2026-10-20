@@ -2492,6 +2492,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "fork-api-host-tests"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "image",
+ "jni 0.21.1",
+ "manatan-ocr-server",
+ "manga-reader-core",
+ "ndk-context",
+ "reqwest 0.12.28",
+ "reqwest_dav",
+ "serde",
+ "serde_json",
+ "smb2",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "zip 6.0.0",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4061,6 +4086,7 @@ dependencies = [
  "egui 0.29.1",
  "flate2",
  "futures",
+ "image",
  "jni 0.21.1",
  "lazy_static",
  "libc",

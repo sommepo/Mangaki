@@ -16,7 +16,7 @@ export function SourceOnboarding() {
     const choose = (kind: 'local' | 'smb' | 'komga') => {
         window.localStorage.setItem(COMPLETE_KEY, 'complete');
         setOpen(false);
-        navigate(`${AppRoutes.settings.path()}?addSource=${kind}`);
+        navigate(`${AppRoutes.settings.path}?addSource=${kind}`);
     };
     const later = () => {
         window.localStorage.setItem(COMPLETE_KEY, 'complete');

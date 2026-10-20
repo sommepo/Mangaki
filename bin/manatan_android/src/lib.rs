@@ -1069,20 +1069,27 @@ async fn serve_react_app(uri: Uri) -> impl IntoResponse {
         return (StatusCode::NOT_FOUND, "404 - WebUI assets not configured").into_response();
     };
     let path_str = uri.path().trim_start_matches('/');
+    // `Path::join` does not normalise `..`, so reject traversal explicitly.
+    let traversal = path_str.split('/').any(|part| part == "..");
 
-    if !path_str.is_empty() {
+    if !path_str.is_empty() && !traversal {
         let file_path = webui_dir.join(path_str);
 
-        if file_path.starts_with(webui_dir) && file_path.exists() {
+        if file_path.starts_with(webui_dir) && file_path.is_file() {
             if let Ok(content) = tokio_fs::read(&file_path).await {
                 let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
+                // Vite emits content-hashed file names under assets/, so they
+                // can be cached for good; everything else must revalidate so an
+                // app update is picked up immediately.
+                let cache_control = if path_str.starts_with("assets/") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache, no-store, must-revalidate"
+                };
                 return (
                     [
                         (axum::http::header::CONTENT_TYPE, mime.as_ref()),
-                        (
-                            axum::http::header::CACHE_CONTROL,
-                            "no-cache, no-store, must-revalidate",
-                        ),
+                        (axum::http::header::CACHE_CONTROL, cache_control),
                     ],
                     content,
                 )

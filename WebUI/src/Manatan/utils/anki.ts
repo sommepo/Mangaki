@@ -32,12 +32,42 @@ export const logAnkiError = (message: string, error: any) => {
     console.warn(message, error);
 };
 
+/**
+ * `response`: Anki itself answered with an error (the request reached it and was handled).
+ * `ambiguous`: the request may have reached Anki but no usable answer came back.
+ */
+class AnkiRequestError extends Error {
+    constructor(
+        message: string,
+        readonly kind: 'response' | 'ambiguous',
+    ) {
+        super(message);
+    }
+}
+
+/** Actions that change the collection; a blind retry could duplicate their effect. */
+const MUTATING_ANKI_ACTIONS = new Set([
+    'addNote',
+    'addNotes',
+    'updateNoteFields',
+    'updateNote',
+    'storeMediaFile',
+    'deleteNotes',
+]);
+
+/**
+ * Escape a value for use inside a double-quoted Anki search term
+ * (e.g. `"Expression:${value}"`), so `*`, `_`, `"` and `\` match literally.
+ */
+export const escapeAnkiSearchText = (value: string): string => value.replace(/([\\"*_])/g, '\\$1');
+
 async function ankiConnect(
     action: string,
     params: Record<string, any>,
     url: string,
 ) {
     const timeoutMs = 20000;
+    const isMutation = MUTATING_ANKI_ACTIONS.has(action);
     const fetchWithTimeout = async (body: Record<string, any>) => {
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -50,12 +80,20 @@ async function ankiConnect(
                 body: JSON.stringify(body),
                 signal: controller.signal,
             });
-            const json = await res.json();
-            if (json.error) throw new Error(json.error);
-            return json.result;
+            let json: any;
+            try {
+                json = await res.json();
+            } catch {
+                throw new AnkiRequestError(`Anki returned an unreadable response (HTTP ${res.status}).`, 'ambiguous');
+            }
+            if (json?.error) throw new AnkiRequestError(String(json.error), 'response');
+            return json?.result;
         } catch (error: any) {
             if (error?.name === 'AbortError') {
-                throw new Error('AnkiConnect request timed out. Make sure AnkiDroid is running and permission is granted.');
+                throw new AnkiRequestError(
+                    'AnkiConnect request timed out. Make sure AnkiDroid is running and permission is granted.',
+                    'ambiguous',
+                );
             }
             throw error;
         } finally {
@@ -68,18 +106,54 @@ async function ankiConnect(
     try {
         return await execute();
     } catch (e: any) {
-        // If fetch fails, it is likely a CORS block. Attempt handshake.
+        const errorMessage = e?.message ?? String(e);
+        // Anki answered with an error (duplicate, missing deck, ...): a permission handshake
+        // cannot change that, and re-sending a mutation must never be done blindly.
+        if (e instanceof AnkiRequestError && e.kind === 'response') {
+            throw new Error(errorMessage);
+        }
+        if (e instanceof AnkiRequestError && e.kind === 'ambiguous') {
+            if (isMutation) {
+                throw new Error(
+                    `${errorMessage} The ${action} request may already have been applied; check Anki before retrying to avoid a duplicate card.`,
+                );
+            }
+            throw new Error(errorMessage);
+        }
+
+        // Network-level failure (connection refused / CORS preflight blocked): attempt the
+        // permission handshake and, if granted, retry once.
+        let permissionGranted = false;
         try {
             const permResult = await fetchWithTimeout({ action: "requestPermission", version: 6 });
-            if (permResult && permResult.permission === 'granted') {
-                return await execute();
-            }
+            permissionGranted = Boolean(permResult && permResult.permission === 'granted');
         } catch (handshakeError) {
             logAnkiError("Anki handshake failed", handshakeError);
         }
+        if (permissionGranted) {
+            // A dropped connection can also surface as a TypeError after Anki processed the
+            // request, so never let the retry of an add knowingly create a duplicate.
+            const retryParams =
+                action === 'addNote' && params?.note?.options?.allowDuplicate
+                    ? {
+                          ...params,
+                          note: { ...params.note, options: { ...params.note.options, allowDuplicate: false } },
+                      }
+                    : params;
+            try {
+                return await fetchWithTimeout({ action, params: retryParams, version: 6 });
+            } catch (retryError: any) {
+                const retryMessage = retryError?.message ?? String(retryError);
+                if (action === 'addNote' && /duplicate/i.test(retryMessage)) {
+                    throw new Error(
+                        'The note may already have been added by the first attempt (Anki reported a duplicate on retry). Check Anki before adding again.',
+                    );
+                }
+                throw new Error(retryMessage);
+            }
+        }
 
         // Standard error handling if handshake doesn't resolve the issue
-        const errorMessage = e?.message ?? String(e);
         if (e instanceof TypeError && errorMessage.includes("Failed to fetch")) {
             throw new Error("Connection blocked. Please click 'Yes' on the Anki permission popup.");
         }
@@ -301,7 +375,11 @@ async function getLastCardId(url: string) {
     if (!notesToday || !Array.isArray(notesToday)) {
         return undefined;
     }
-    const id = notesToday.sort().at(-1);
+    const id = notesToday.reduce<number | undefined>(
+        (latest, current) =>
+            typeof current === 'number' && (latest === undefined || current > latest) ? current : latest,
+        undefined,
+    );
     return id;
 }
 

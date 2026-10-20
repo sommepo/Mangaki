@@ -15,7 +15,7 @@ import IconButton from '@mui/material/IconButton';
 import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ForkApi, ForkSeries, OcrState } from '@/features/fork/ForkApi';
 import { useForkState } from '@/features/fork/useForkState';
@@ -24,6 +24,9 @@ import { ForkProgress } from '@/features/fork/components/ForkProgress';
 import { ForkSelectionBar } from '@/features/fork/components/ForkSelectionBar';
 import { useOCR } from '@/Manatan/context/OCRContext';
 import { ReaderResumeMode } from '@/features/reader/Reader.types';
+import { useBackDismiss } from '@/features/fork/useBackDismiss';
+
+const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
 const OCR_LABELS: Record<OcrState, string> = {
     not_prepared: 'OCR not prepared',
@@ -101,28 +104,43 @@ function VolumeOcrIndicator({ state }: { state: OcrState }) {
 }
 
 export function SeriesDetail() {
-    useAppTitle('Volumes');
-    const { seriesId = '' } = useParams();
+    const { seriesId = '' } = useParams<{ seriesId: string }>();
     const navigate = useNavigate();
     const { state } = useForkState();
     const { settings, showConfirm } = useOCR();
-    const [series, setSeries] = useState<ForkSeries>();
+    // Render instantly from the Library's catalogue cache, then revalidate.
+    const [series, setSeries] = useState<ForkSeries | undefined>(() =>
+        ForkApi.cachedCatalogue()?.find((candidate) => candidate.id === seriesId),
+    );
     const [selected, setSelected] = useState<string[]>([]);
     const [selecting, setSelecting] = useState(false);
     const [status, setStatus] = useState<string>();
-    const load = async () => {
+    useAppTitle(series?.title ?? 'Volumes', [series?.title]);
+    const latestLoad = useRef(0);
+    const load = useCallback(async () => {
+        // Ignore responses that finish after a newer load or after leaving this series.
+        latestLoad.current += 1;
+        const loadId = latestLoad.current;
         const item = (await ForkApi.catalogue()).find((candidate) => candidate.id === seriesId);
+        if (loadId !== latestLoad.current) return;
         setSeries(item);
         if (!item) setStatus('This series is hidden or unavailable.');
-    };
-    useEffect(() => {
-        load().catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
     }, [seriesId]);
+    useEffect(() => {
+        load().catch((error) => setStatus(messageOf(error)));
+        return () => {
+            latestLoad.current += 1;
+        };
+    }, [load]);
     const toggle = (id: string) =>
         setSelected((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
     const leaveSelection = () => {
         setSelected([]);
         setSelecting(false);
+    };
+    useBackDismiss(selecting, leaveSelection);
+    const run = (work: () => Promise<unknown>) => {
+        work().catch((error) => setStatus(messageOf(error)));
     };
     const applySensitive = async (sensitive: boolean) => {
         await ForkApi.setVolumeSensitive(selected, sensitive);
@@ -157,13 +175,11 @@ export function SeriesDetail() {
                     { ocrProvider: settings.ocrProvider, selfHostedUrl: settings.selfHostedOcrUrl },
                 )
                     .then(async (job) => {
-                        setStatus(
-                            `Queued ${job.totalPages ?? 0} pages. Progress is available in Settings → Background activity.`,
-                        );
+                        setStatus(`Queued ${job.totalPages ?? 0} pages. Progress is shown in Activity.`);
                         setSelected([]);
                         await load();
                     })
-                    .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
+                    .catch((error) => setStatus(messageOf(error)));
             },
         );
     };
@@ -182,34 +198,26 @@ export function SeriesDetail() {
                     { ocrProvider: settings.ocrProvider, selfHostedUrl: settings.selfHostedOcrUrl },
                 )
                     .then(async (job) => {
-                        setStatus(
-                            `Queued ${job.totalPages ?? 0} pages. Progress is available in Settings → Background activity.`,
-                        );
+                        setStatus(`Queued ${job.totalPages ?? 0} pages. Progress is shown in Activity.`);
                         setSelected([]);
                         await load();
                     })
-                    .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
+                    .catch((error) => setStatus(messageOf(error)));
             },
         );
     };
     const remote = Boolean(series && state?.sources.find((source) => source.id === series.sourceId)?.kind !== 'local');
+    const seriesProgress = useMemo(() => {
+        const readable = series?.volumes.filter((volume) => volume.pageCount > 0 && !volume.error) ?? [];
+        const read = readable.reduce((sum, volume) => sum + Math.min(volume.progressPage, volume.pageCount - 1), 0);
+        const total = readable.reduce((sum, volume) => sum + volume.pageCount - 1, 0);
+        return (read / Math.max(1, total)) * 100;
+    }, [series]);
     return (
         <Stack spacing={2} sx={{ p: { xs: 1.5, sm: 3 }, pb: { xs: 11, sm: 10 }, maxWidth: 1000, mx: 'auto' }}>
             <Stack direction="row" spacing={1} alignItems="center">
                 <Box sx={{ flex: 1, minWidth: 0 }}>
-                    {series && (
-                        <ForkProgress
-                            value={
-                                (series.volumes.reduce((sum, volume) => sum + volume.progressPage, 0) /
-                                    Math.max(
-                                        1,
-                                        series.volumes.reduce((sum, volume) => sum + volume.pageCount - 1, 0),
-                                    )) *
-                                100
-                            }
-                            label="Series reading progress"
-                        />
-                    )}
+                    {series && <ForkProgress value={seriesProgress} label="Series reading progress" />}
                 </Box>
                 <IconButton
                     color={selecting ? 'primary' : 'default'}
@@ -221,53 +229,33 @@ export function SeriesDetail() {
             </Stack>
             {selecting && selected.length > 0 && (
                 <ForkSelectionBar count={selected.length} onClose={leaveSelection}>
-                    <Button
-                        variant="contained"
-                        onClick={() => prepare(false).catch((error) => setStatus(String(error)))}
-                    >
+                    {/* prepare/download open a confirmation and handle their own errors (they return void). */}
+                    <Button variant="contained" onClick={() => prepare(false)}>
                         OCR
                     </Button>
-                    <Button color="inherit" onClick={() => prepare(true).catch((error) => setStatus(String(error)))}>
+                    <Button color="inherit" onClick={() => prepare(true)}>
                         Reprocess
                     </Button>
                     {remote && (
-                        <Button
-                            color="inherit"
-                            onClick={() => download(false).catch((error) => setStatus(String(error)))}
-                        >
+                        <Button color="inherit" onClick={() => download(false)}>
                             Offline
                         </Button>
                     )}
                     {remote && (
-                        <Button
-                            color="inherit"
-                            onClick={() => download(true).catch((error) => setStatus(String(error)))}
-                        >
+                        <Button color="inherit" onClick={() => download(true)}>
                             Offline + prepare OCR
                         </Button>
                     )}
-                    <Button
-                        color="inherit"
-                        onClick={() => applySensitive(true).catch((error) => setStatus(String(error)))}
-                    >
-                        Mark hidden
+                    <Button color="inherit" onClick={() => run(() => applySensitive(true))}>
+                        Mark NSFW
                     </Button>
-                    <Button
-                        color="inherit"
-                        onClick={() => applySensitive(false).catch((error) => setStatus(String(error)))}
-                    >
-                        Remove hidden
+                    <Button color="inherit" onClick={() => run(() => applySensitive(false))}>
+                        Remove NSFW
                     </Button>
-                    <Button
-                        color="inherit"
-                        onClick={() => setReadState(selected, true, true).catch((error) => setStatus(String(error)))}
-                    >
+                    <Button color="inherit" onClick={() => run(() => setReadState(selected, true, true))}>
                         Mark read
                     </Button>
-                    <Button
-                        color="inherit"
-                        onClick={() => setReadState(selected, false, true).catch((error) => setStatus(String(error)))}
-                    >
+                    <Button color="inherit" onClick={() => run(() => setReadState(selected, false, true))}>
                         Mark unread
                     </Button>
                 </ForkSelectionBar>
@@ -314,9 +302,10 @@ export function SeriesDetail() {
                                     {isReadable ? (
                                         <Box
                                             component="img"
-                                            src={`/api/fork/volumes/${encodeURIComponent(volume.id)}/pages/0?fingerprint=${encodeURIComponent(volume.fingerprint)}`}
+                                            src={`/api/fork/volumes/${encodeURIComponent(volume.id)}/thumbnail?fingerprint=${encodeURIComponent(volume.fingerprint)}`}
                                             alt=""
                                             loading="lazy"
+                                            decoding="async"
                                             sx={{
                                                 display: 'block',
                                                 width: '100%',
@@ -382,11 +371,7 @@ export function SeriesDetail() {
                                     <IconButton
                                         size="small"
                                         aria-label={`Mark ${volume.title} ${isRead ? 'unread' : 'read'}`}
-                                        onClick={() =>
-                                            setReadState([volume.id], !isRead).catch((error) =>
-                                                setStatus(String(error)),
-                                            )
-                                        }
+                                        onClick={() => run(() => setReadState([volume.id], !isRead))}
                                     >
                                         {isRead ? <ReplayIcon fontSize="small" /> : <DoneAllIcon fontSize="small" />}
                                     </IconButton>

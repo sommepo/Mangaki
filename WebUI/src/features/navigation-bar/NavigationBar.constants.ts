@@ -12,18 +12,31 @@ import BarChartIcon from '@mui/icons-material/BarChart';
 import BarChartOutlinedIcon from '@mui/icons-material/BarChartOutlined';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
+import SyncIcon from '@mui/icons-material/Sync';
+import SyncOutlinedIcon from '@mui/icons-material/SyncOutlined';
 import type { NavbarItem } from '@/features/navigation-bar/NavigationBar.types.ts';
 import { NavBarItemMoreGroup } from '@/features/navigation-bar/NavigationBar.types.ts';
 import { AppRoutes } from '@/base/AppRoute.constants.ts';
+import { useActiveForkJobBadge } from '@/features/fork/useForkState.ts';
 
 export const NAVIGATION_BAR_ITEMS = [
     {
-        path: AppRoutes.library.path(),
+        // '/library' with no tab/search params is a static route; the builder just isn't typed as one.
+        path: AppRoutes.library.path() as NavbarItem['path'],
         title: 'Library' as NavbarItem['title'],
         SelectedIconComponent: MenuBookIcon,
         IconComponent: MenuBookOutlinedIcon,
         show: 'both',
         moreGroup: NavBarItemMoreGroup.GENERAL,
+    },
+    {
+        path: AppRoutes.activity.path,
+        title: 'Activity' as NavbarItem['title'],
+        SelectedIconComponent: SyncIcon,
+        IconComponent: SyncOutlinedIcon,
+        show: 'both',
+        moreGroup: NavBarItemMoreGroup.GENERAL,
+        useBadge: useActiveForkJobBadge,
     },
     {
         path: AppRoutes.stats.path,

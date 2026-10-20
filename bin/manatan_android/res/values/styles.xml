@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Reader/library window. Android 8-9 have no system dark mode, so they use the light
+        variant; Android 10+ uses DayNight (values-v29). The theme's isLightTheme value is what
+        WebView reports to the page as prefers-color-scheme, so a fixed dark theme would force the
+        web UI's "system" appearance to dark.
+    -->
+    <style name="MangakiWebTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/mangaki_surface</item>
+        <item name="android:statusBarColor">@color/mangaki_surface</item>
+        <item name="android:navigationBarColor">@color/mangaki_surface</item>
+    </style>
+</resources>

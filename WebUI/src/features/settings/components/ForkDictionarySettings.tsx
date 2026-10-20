@@ -23,9 +23,15 @@ export const ForkDictionarySettings = () => {
 
     const refresh = useCallback(async () => {
         setLoading(true);
-        const result = await getDictionaries();
-        if (result) setDictionaries(result);
-        setLoading(false);
+        try {
+            const result = await getDictionaries();
+            if (result) setDictionaries(result);
+        } catch (cause) {
+            setStatus(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+            // A failed listing must not leave the section stuck in its loading state.
+            setLoading(false);
+        }
     }, []);
 
     useEffect(() => {
@@ -120,12 +126,15 @@ export const ForkDictionarySettings = () => {
                                     <Switch
                                         size="small"
                                         checked={dictionary.enabled}
-                                        onChange={async () => {
-                                            await manageDictionary('Toggle', {
+                                        onChange={() => {
+                                            manageDictionary('Toggle', {
                                                 id: dictionary.id,
                                                 enabled: !dictionary.enabled,
-                                            });
-                                            await refresh();
+                                            })
+                                                .then(refresh)
+                                                .catch((error) =>
+                                                    setStatus(error instanceof Error ? error.message : String(error)),
+                                                );
                                         }}
                                     />
                                 }

@@ -79,6 +79,8 @@ export type WordAudioSource = 'jpod101' | 'language-pod-101' | 'jisho' | 'lingua
 
 export type WordAudioSourceSelection = WordAudioSource | 'auto';
 
+export type LookupTriggerKey = 'left-click' | 'right-click' | 'middle-click' | 'shift' | 'control' | 'alt' | 'super';
+
 export interface ServerSettingsData {
     authUsername?: string;
     authPassword?: string;
@@ -200,6 +202,10 @@ export interface Settings {
     yomitanLookupNavigationMode: 'tabs' | 'stacked';
     yomitanLookupMaxHistory: number;
     yomitanShowKanjiInNormalLookup: boolean;
+    /** Persisted desktop lookup trigger; normalized on load by `normalizeLookupTrigger`. */
+    yomitanLookupTrigger?: LookupTriggerKey;
+    /** Persisted text-box context-menu hotkeys; normalized on load by `normalizeTextBoxContextMenuHotkeys`. */
+    textBoxContextMenuHotkeys?: string[];
 }
 
 export type MergeState = { imgSrc: string; index: number } | null;

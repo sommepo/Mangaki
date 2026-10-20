@@ -30,7 +30,11 @@ android {
     buildTypes {
         release {
             debuggable false
+            // R8 would shrink the bundled ML Kit/Play-services dex. It stays off until a release
+            // build with it has passed OCR, Anki and JNI checks on a device; proguard-rules.pro
+            // already keeps everything reached by name (JNI, JS bridge, manifest).
             minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
         }
     }

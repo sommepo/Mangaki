@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: same exclusions as backup_rules.xml for cloud backup and device transfer. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="manga_reader_fork_secrets.xml" />
+        <exclude domain="sharedpref" path="manga_reader_anki_bridge.xml" />
+        <exclude domain="sharedpref" path="runtime_recovery.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="manga_reader_fork_secrets.xml" />
+        <exclude domain="sharedpref" path="manga_reader_anki_bridge.xml" />
+        <exclude domain="sharedpref" path="runtime_recovery.xml" />
+    </device-transfer>
+</data-extraction-rules>

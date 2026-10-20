@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto Backup (Android 11 and lower). Credentials are excluded by default: they are encrypted
+    with an Android Keystore key that never leaves this device, so a restored copy could not be
+    decrypted anyway. The Anki bridge token and the transient recovery URL are device-local too.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="manga_reader_fork_secrets.xml" />
+    <exclude domain="sharedpref" path="manga_reader_anki_bridge.xml" />
+    <exclude domain="sharedpref" path="runtime_recovery.xml" />
+</full-backup-content>

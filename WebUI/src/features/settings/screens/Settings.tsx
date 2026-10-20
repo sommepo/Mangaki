@@ -37,20 +37,20 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle';
+import { makeToast } from '@/base/utils/Toast';
 import { useOCR } from '@/Manatan/context/OCRContext';
 import { ForkApi, ForkCategory, ForkScanPreview, ForkSource } from '@/features/fork/ForkApi';
 import {
-    readReaderPreferences,
-    ReaderDirection,
-    ReaderFit,
-    writeReaderPreferences,
-} from '@/features/fork/ReaderPreferences';
+    legacyPreferencesToReaderSettings,
+    MangakiReaderSettings,
+    writeReaderDefaults,
+} from '@/features/fork/ReaderDefaults';
 import { useForkState } from '@/features/fork/useForkState';
 import { ActivityContent } from '@/features/fork/Activity';
 import { ForkDictionarySettings } from '@/features/settings/components/ForkDictionarySettings';
 import { ForkAnkiSettings } from '@/features/settings/components/ForkAnkiSettings';
 import { GLOBAL_READER_SETTINGS_MANGA } from '@/features/manga/Manga.constants';
-import { IReaderSettings } from '@/features/reader/Reader.types';
+import { IReaderSettings, ReaderPageScaleMode, ReadingDirection, ReadingMode } from '@/features/reader/Reader.types';
 import { TapZoneLayouts } from '@/features/reader/tap-zones/TapZoneLayout.types';
 import {
     updateReaderSettings,
@@ -120,7 +120,11 @@ const SourceDialog = ({
         [draft],
     );
     useEffect(() => {
-        if (open) setDraft({ ...emptySource, kind: initialKind ?? 'local' });
+        if (!open) return;
+        setDraft({ ...emptySource, kind: initialKind ?? 'local' });
+        // Do not show the previous attempt's result or Komga libraries in a fresh dialog.
+        setStatus(undefined);
+        setKomgaLibraries([]);
     }, [initialKind, open]);
     const test = async () => {
         setBusy(true);
@@ -281,7 +285,6 @@ export function Settings() {
     const [categoryToRemove, setCategoryToRemove] = useState<ForkCategory>();
     const [categoryToRename, setCategoryToRename] = useState<ForkCategory>();
     const [categoryRenameName, setCategoryRenameName] = useState('');
-    const [readerPreferences, setReaderPreferences] = useState(readReaderPreferences);
     const [ocrServerStatus, setOcrServerStatus] = useState<string>();
     const [testingOcrServer, setTestingOcrServer] = useState(false);
     const {
@@ -290,6 +293,14 @@ export function Settings() {
         request: defaultReaderSettingsRequest,
     } = useDefaultReaderSettingsWithDefaultFlag();
     const [readerSettingsStatus, setReaderSettingsStatus] = useState<string>();
+    // Failures (e.g. a duplicate category name) used to be silent unhandled rejections.
+    const run = async (work: () => Promise<unknown>) => {
+        try {
+            await work();
+        } catch (cause) {
+            makeToast(cause instanceof Error ? cause.message : String(cause), 'error');
+        }
+    };
     const [searchParams, setSearchParams] = useSearchParams();
     const requestedKind = searchParams.get('addSource');
     const initialKind: ForkSource['kind'] | undefined =
@@ -318,8 +329,13 @@ export function Settings() {
     const exportBackup = async () => {
         try {
             const fork = await ForkApi.exportBackup();
+            const readerSettings: MangakiReaderSettings = {
+                readingMode: defaultReaderSettings.readingMode.value,
+                readingDirection: defaultReaderSettings.readingDirection.value,
+                pageScaleMode: defaultReaderSettings.pageScaleMode.value,
+            };
             const content = JSON.stringify(
-                { product: 'manga-reader-fork', schemaVersion: 1, fork, settings, readerPreferences },
+                { product: 'manga-reader-fork', schemaVersion: 1, fork, settings, readerSettings },
                 null,
                 2,
             );
@@ -355,9 +371,12 @@ export function Settings() {
                 throw new Error('This is not a supported Mangaki backup');
             await ForkApi.restoreBackup(backup.fork);
             setSettings({ ...settings, ...backup.settings });
-            if (backup.readerPreferences) {
-                setReaderPreferences(backup.readerPreferences);
-                writeReaderPreferences(backup.readerPreferences);
+            const readerSettings: Partial<MangakiReaderSettings> | undefined =
+                backup.readerSettings ??
+                (backup.readerPreferences ? legacyPreferencesToReaderSettings(backup.readerPreferences) : undefined);
+            if (readerSettings) {
+                await writeReaderDefaults(readerSettings);
+                await defaultReaderSettingsRequest.refetch();
             }
             await refresh();
             setBackupStatus('Backup restored. Re-authorise folders and remote credentials before scanning.');
@@ -424,10 +443,7 @@ export function Settings() {
                     value={defaultReaderSettings.tapZoneLayout.value}
                     disabled={defaultReaderSettingsLoading}
                     onChange={(event) =>
-                        void updateDefaultReaderSetting(
-                            'tapZoneLayout',
-                            Number(event.target.value) as TapZoneLayouts,
-                        )
+                        void updateDefaultReaderSetting('tapZoneLayout', Number(event.target.value) as TapZoneLayouts)
                     }
                     helperText="Controls page-turn and menu tap areas in the reader. Choose Disabled to turn off edge page turns."
                 >
@@ -438,48 +454,52 @@ export function Settings() {
                     <MenuItem value={TapZoneLayouts.DISABLED}>Disabled</MenuItem>
                 </TextField>
                 {readerSettingsStatus && <Alert severity="error">{readerSettingsStatus}</Alert>}
+                {/* These edit the reader's own default settings (global reader metadata), the same values
+                    the reader's quick controls change; a series can still override them in the reader. */}
                 <TextField
                     select
                     size="small"
                     label="Reading direction"
-                    value={readerPreferences.direction}
-                    onChange={(event) => {
-                        const value = { ...readerPreferences, direction: event.target.value as ReaderDirection };
-                        setReaderPreferences(value);
-                        writeReaderPreferences(value);
-                    }}
+                    value={defaultReaderSettings.readingDirection.value}
+                    disabled={defaultReaderSettingsLoading}
+                    onChange={(event) =>
+                        updateDefaultReaderSetting('readingDirection', Number(event.target.value) as ReadingDirection)
+                    }
                 >
-                    <MenuItem value="rtl">Right to left (manga default)</MenuItem>
-                    <MenuItem value="ltr">Left to right</MenuItem>
-                    <MenuItem value="vertical">Vertical</MenuItem>
+                    <MenuItem value={ReadingDirection.RTL}>Right to left (manga default)</MenuItem>
+                    <MenuItem value={ReadingDirection.LTR}>Left to right</MenuItem>
+                </TextField>
+                <TextField
+                    select
+                    size="small"
+                    label="Page layout"
+                    value={defaultReaderSettings.readingMode.value}
+                    disabled={defaultReaderSettingsLoading}
+                    onChange={(event) =>
+                        updateDefaultReaderSetting('readingMode', Number(event.target.value) as ReadingMode)
+                    }
+                >
+                    <MenuItem value={ReadingMode.SINGLE_PAGE}>Single page</MenuItem>
+                    <MenuItem value={ReadingMode.DOUBLE_PAGE}>Two-page spread</MenuItem>
+                    <MenuItem value={ReadingMode.CONTINUOUS_VERTICAL}>Vertical scroll</MenuItem>
+                    <MenuItem value={ReadingMode.WEBTOON}>Webtoon (no gaps)</MenuItem>
+                    <MenuItem value={ReadingMode.CONTINUOUS_HORIZONTAL}>Horizontal scroll</MenuItem>
                 </TextField>
                 <TextField
                     select
                     size="small"
                     label="Page fit"
-                    value={readerPreferences.fit}
-                    onChange={(event) => {
-                        const value = { ...readerPreferences, fit: event.target.value as ReaderFit };
-                        setReaderPreferences(value);
-                        writeReaderPreferences(value);
-                    }}
-                >
-                    <MenuItem value="contain">Fit whole page</MenuItem>
-                    <MenuItem value="width">Fit width</MenuItem>
-                </TextField>
-                <FormControlLabel
-                    control={
-                        <Switch
-                            checked={readerPreferences.twoPage}
-                            onChange={(_, checked) => {
-                                const value = { ...readerPreferences, twoPage: checked };
-                                setReaderPreferences(value);
-                                writeReaderPreferences(value);
-                            }}
-                        />
+                    value={defaultReaderSettings.pageScaleMode.value}
+                    disabled={defaultReaderSettingsLoading}
+                    onChange={(event) =>
+                        updateDefaultReaderSetting('pageScaleMode', Number(event.target.value) as ReaderPageScaleMode)
                     }
-                    label="Two-page spread on wide screens"
-                />
+                >
+                    <MenuItem value={ReaderPageScaleMode.SCREEN}>Fit whole page</MenuItem>
+                    <MenuItem value={ReaderPageScaleMode.WIDTH}>Fit width</MenuItem>
+                    <MenuItem value={ReaderPageScaleMode.HEIGHT}>Fit height</MenuItem>
+                    <MenuItem value={ReaderPageScaleMode.ORIGINAL}>Original size</MenuItem>
+                </TextField>
                 <TextField
                     select
                     size="small"
@@ -552,7 +572,8 @@ export function Settings() {
                     <MenuItem value="artwork">Tap original artwork (experimental)</MenuItem>
                 </TextField>
                 <Typography variant="body2" color="text.secondary">
-                    Reader direction, fit and OCR interaction are also reflected by the reader’s quick controls.
+                    These are the reader’s defaults. Changing direction, layout or fit from the reader’s quick controls
+                    applies to that series only.
                 </Typography>
             </Stack>,
         ],
@@ -565,11 +586,17 @@ export function Settings() {
                     control={
                         <Switch
                             checked={state?.showSensitive ?? false}
-                            onChange={async (_, checked) => setState(await ForkApi.setSensitiveVisibility(checked))}
+                            onChange={(_, checked) =>
+                                run(async () => setState(await ForkApi.setSensitiveVisibility(checked)))
+                            }
                         />
                     }
-                    label="Show hidden manga"
+                    label="Show NSFW manga"
                 />
+                <Typography variant="body2" color="text.secondary">
+                    Off hides manga you marked NSFW from Library, search, Stats and Activity. Hiding is not encryption
+                    and never deletes data.
+                </Typography>
                 <Typography variant="subtitle2">Categories</Typography>
                 {state?.categories?.map((category, index) => (
                     <Stack key={category.id} direction="row" alignItems="center" justifyContent="space-between">
@@ -578,24 +605,28 @@ export function Settings() {
                             <Button
                                 size="small"
                                 disabled={index === 0}
-                                onClick={async () => {
-                                    const ids = state.categories.map((item) => item.id);
-                                    [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
-                                    await ForkApi.reorderCategories(ids);
-                                    await refresh();
-                                }}
+                                onClick={() =>
+                                    run(async () => {
+                                        const ids = state.categories.map((item) => item.id);
+                                        [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+                                        await ForkApi.reorderCategories(ids);
+                                        await refresh();
+                                    })
+                                }
                             >
                                 Up
                             </Button>
                             <Button
                                 size="small"
                                 disabled={index + 1 === state.categories.length}
-                                onClick={async () => {
-                                    const ids = state.categories.map((item) => item.id);
-                                    [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]];
-                                    await ForkApi.reorderCategories(ids);
-                                    await refresh();
-                                }}
+                                onClick={() =>
+                                    run(async () => {
+                                        const ids = state.categories.map((item) => item.id);
+                                        [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]];
+                                        await ForkApi.reorderCategories(ids);
+                                        await refresh();
+                                    })
+                                }
                             >
                                 Down
                             </Button>
@@ -624,11 +655,13 @@ export function Settings() {
                     />
                     <Button
                         disabled={!categoryName.trim()}
-                        onClick={async () => {
-                            await ForkApi.addCategory(categoryName);
-                            setCategoryName('');
-                            await refresh();
-                        }}
+                        onClick={() =>
+                            run(async () => {
+                                await ForkApi.addCategory(categoryName);
+                                setCategoryName('');
+                                await refresh();
+                            })
+                        }
                     >
                         Add
                     </Button>
@@ -694,6 +727,9 @@ export function Settings() {
                         key={title}
                         disableGutters
                         elevation={0}
+                        // Collapsed sections stay unmounted: Activity polling, AnkiConnect probes and
+                        // dictionary listing only run once their section is opened.
+                        slotProps={{ transition: { unmountOnExit: true } }}
                         sx={{
                             bgcolor: 'transparent',
                             backgroundImage: 'none',
@@ -794,12 +830,17 @@ export function Settings() {
                     <Button onClick={() => setSourceToRemove(undefined)}>Cancel</Button>
                     <Button
                         color="error"
-                        onClick={async () => {
-                            if (!sourceToRemove) return;
-                            await ForkApi.removeSource(sourceToRemove.id);
-                            setSourceToRemove(undefined);
-                            await refresh();
-                        }}
+                        onClick={() =>
+                            run(async () => {
+                                if (!sourceToRemove) return;
+                                try {
+                                    await ForkApi.removeSource(sourceToRemove.id);
+                                } finally {
+                                    setSourceToRemove(undefined);
+                                }
+                                await refresh();
+                            })
+                        }
                     >
                         Remove source
                     </Button>
@@ -816,12 +857,17 @@ export function Settings() {
                     <Button onClick={() => setCategoryToRemove(undefined)}>Cancel</Button>
                     <Button
                         color="error"
-                        onClick={async () => {
-                            if (!categoryToRemove) return;
-                            await ForkApi.removeCategory(categoryToRemove.id);
-                            setCategoryToRemove(undefined);
-                            await refresh();
-                        }}
+                        onClick={() =>
+                            run(async () => {
+                                if (!categoryToRemove) return;
+                                try {
+                                    await ForkApi.removeCategory(categoryToRemove.id);
+                                } finally {
+                                    setCategoryToRemove(undefined);
+                                }
+                                await refresh();
+                            })
+                        }
                     >
                         Remove category
                     </Button>
@@ -849,12 +895,14 @@ export function Settings() {
                     <Button onClick={() => setCategoryToRename(undefined)}>Cancel</Button>
                     <Button
                         disabled={!categoryRenameName.trim()}
-                        onClick={async () => {
-                            if (!categoryToRename) return;
-                            await ForkApi.renameCategory(categoryToRename.id, categoryRenameName);
-                            setCategoryToRename(undefined);
-                            await refresh();
-                        }}
+                        onClick={() =>
+                            run(async () => {
+                                if (!categoryToRename) return;
+                                await ForkApi.renameCategory(categoryToRename.id, categoryRenameName);
+                                setCategoryToRename(undefined);
+                                await refresh();
+                            })
+                        }
                     >
                         Rename
                     </Button>

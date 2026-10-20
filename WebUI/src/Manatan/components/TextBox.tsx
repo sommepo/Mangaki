@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState, useLayoutEffect, useEffect, memo } from 'react';
-import { COLOR_THEMES, OcrBlock } from '@/Manatan/types';
-import { useOCR } from '@/Manatan/context/OCRContext';
+import { COLOR_THEMES, DictPopupState, OcrBlock } from '@/Manatan/types';
+import { useOCRTextBox } from '@/Manatan/context/OCRContext';
 import { cleanPunctuation, lookupYomitan } from '@/Manatan/utils/api';
 import { isNoSpaceLanguage } from '@/Manatan/utils/language';
 import { updateLastCard } from '@/Manatan/utils/anki';
@@ -51,12 +51,13 @@ export const TextBox: React.FC<{
         mergeAnchor,
         setMergeAnchor,
         setDictPopup,
-        dictPopup,
+        dictPopupVisible,
+        dictPopupHighlight,
         wasPopupClosedRecently,
         showDialog,
         showProgress,
         closeDialog,
-    } = useOCR();
+    } = useOCRTextBox();
     const [isEditing, setIsEditing] = useState(false);
     const [isActive, setIsActive] = useState(false);
     const [isLocalHover, setIsLocalHover] = useState(false); 
@@ -70,8 +71,8 @@ export const TextBox: React.FC<{
     const lookupGeneration = useRef(0);
 
     const justActivated = useRef(false);
-    const dictPopupRef = useRef(dictPopup.visible);
-    useEffect(() => { dictPopupRef.current = dictPopup.visible; }, [dictPopup.visible]);
+    const dictPopupRef = useRef(dictPopupVisible);
+    useEffect(() => { dictPopupRef.current = dictPopupVisible; }, [dictPopupVisible]);
 
     const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -208,12 +209,12 @@ export const TextBox: React.FC<{
             return;
         }
 
-        if (!dictPopup.visible) {
+        if (!dictPopupVisible) {
             if (isActive) selection.removeAllRanges();
             return;
         }
 
-        const highlight = dictPopup.highlight;
+        const highlight = dictPopupHighlight;
         if (!highlight || highlight.imgSrc !== imgSrc || highlight.index !== index) {
             return;
         }
@@ -235,7 +236,7 @@ export const TextBox: React.FC<{
                 // Silently fail
             }
         }
-    }, [dictPopup.visible, dictPopup.highlight, imgSrc, index, displayContent, isActive, settings.ocrBoxlessMode]);
+    }, [dictPopupVisible, dictPopupHighlight, imgSrc, index, displayContent, isActive, settings.ocrBoxlessMode]);
 
     useEffect(() => {
         if (!isActive || !settings.mobileMode) return;
@@ -395,7 +396,17 @@ export const TextBox: React.FC<{
             closeDialog();
             makeToast('Failed to update Anki card', 'error', err.message);
         }
-    }, [closeDialog, getCleanSentence, getTargetField, imgSrc, settings.ankiConnectUrl, settings.ankiImageQuality, showProgress]);
+    }, [
+        closeDialog,
+        getCleanSentence,
+        getTargetField,
+        imgSrc,
+        settings.ankiConnectUrl,
+        settings.ankiImageQuality,
+        settings.ankiDownscaleMaxWidth,
+        settings.ankiDownscaleMaxHeight,
+        showProgress,
+    ]);
 
     const confirmAnkiUpdate = useCallback((action: () => void) => {
         if (settings.skipAnkiUpdateConfirm) {
@@ -506,7 +517,7 @@ export const TextBox: React.FC<{
 
     const handleInteract = async (e: React.MouseEvent) => {
         const selection = window.getSelection();
-        if (selection && !selection.isCollapsed && !dictPopup.visible) {
+        if (selection && !selection.isCollapsed && !dictPopupVisible) {
             // Desktop keeps native drag-selection semantics. On Android a
             // selection left behind by a cancelled popup or transformed text
             // node otherwise makes every later OCR click return early.
@@ -600,6 +611,7 @@ export const TextBox: React.FC<{
                 x: e.clientX,
                 y: e.clientY,
                 results: [],
+                kanjiResults: [],
                 isLoading: true,
                 systemLoading: false,
                 highlight: undefined,
@@ -616,7 +628,7 @@ export const TextBox: React.FC<{
 
             if (requestGeneration !== lookupGeneration.current) return;
 
-            const stillCurrentLookup = (current: typeof dictPopup) =>
+            const stillCurrentLookup = (current: DictPopupState) =>
                 current.visible
                 && current.context?.imgSrc === imgSrc
                 && current.context?.sentence === cleanContent;
@@ -683,7 +695,7 @@ export const TextBox: React.FC<{
     };
 
     const isMergedTarget = mergeAnchor?.imgSrc === imgSrc && mergeAnchor?.index === index;
-    const isLookingUp = dictPopup.visible && dictPopup.highlight?.imgSrc === imgSrc && dictPopup.highlight?.index === index;
+    const isLookingUp = dictPopupVisible && dictPopupHighlight?.imgSrc === imgSrc && dictPopupHighlight?.index === index;
 
     const classes = ['gemini-ocr-text-box', isVertical ? 'vertical' : '', isEditing ? 'editing' : '', isMergedTarget ? 'merge-target' : '', isActive ? 'mobile-active' : '', isLookingUp ? 'active-lookup' : '', settings.ocrBoxlessMode ? 'boxless' : ''].filter(Boolean).join(' ');
 

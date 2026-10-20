@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.webkit.WebSettings;
 import android.widget.Toast;
 
 public class MangatanActivity extends NativeActivity {
@@ -24,6 +25,23 @@ public class MangatanActivity extends NativeActivity {
         runtimeHostAlive = true;
         handleLaunchIntent(getIntent());
         AnkiBridge.startAnkiConnectServer(getApplicationContext());
+        prewarmWebView();
+    }
+
+    /**
+     * Loading the WebView provider (Chromium's native library) takes a noticeable part of cold
+     * start. Do it while the main thread is idle and the embedded server is still booting, so the
+     * reader WebView is created against an already-loaded provider.
+     */
+    private void prewarmWebView() {
+        Looper.myQueue().addIdleHandler(() -> {
+            try {
+                WebSettings.getDefaultUserAgent(getApplicationContext());
+            } catch (RuntimeException error) {
+                Log.w("MangaReader", "WebView prewarm failed", error);
+            }
+            return false;
+        });
     }
 
     public static boolean isRuntimeHostAlive() {

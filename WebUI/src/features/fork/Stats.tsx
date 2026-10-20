@@ -11,7 +11,7 @@ import Stack from '@mui/material/Stack';
 import Tab from '@mui/material/Tab';
 import Tabs from '@mui/material/Tabs';
 import Typography from '@mui/material/Typography';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle';
 import { ForkApi, ForkReadingSession } from '@/features/fork/ForkApi';
 import { useForkState } from '@/features/fork/useForkState';
@@ -29,31 +29,49 @@ export const Stats = () => {
     const { showConfirm } = useOCR();
     const { state, error, refresh } = useForkState();
     const stats = state?.stats[range];
-    const load = useCallback(
-        () =>
-            ForkApi.readingSessions(range)
-                .then((result) => {
-                    setSessions(result.sessions);
-                    const available = new Set(result.sessions.map((session) => session.sessionId));
-                    setSelected((current) => current.filter((id) => available.has(id)));
-                })
-                .catch(() => setSessions([])),
-        [range],
-    );
+    const latestLoad = useRef(0);
+    const load = useCallback(() => {
+        // Switching ranges quickly must not let a slower, older response replace the newer one.
+        latestLoad.current += 1;
+        const loadId = latestLoad.current;
+        return ForkApi.readingSessions(range)
+            .then((result) => {
+                if (loadId !== latestLoad.current) return;
+                setSessions(result.sessions);
+                const available = new Set(result.sessions.map((session) => session.sessionId));
+                setSelected((current) => current.filter((id) => available.has(id)));
+            })
+            .catch(() => {
+                if (loadId === latestLoad.current) setSessions([]);
+            });
+    }, [range]);
+    // Sessions only change with the range or after a removal (which reloads explicitly);
+    // the previous dependency on the whole /state object fetched them twice per visit.
     useEffect(() => {
         load();
-    }, [load, state]);
-    const grouped = useMemo(
-        () =>
-            sessions.reduce<Record<string, ForkReadingSession[]>>(
-                (result, session) => ({
-                    ...result,
-                    [session.seriesId]: [...(result[session.seriesId] ?? []), session],
-                }),
-                {},
-            ),
-        [sessions],
-    );
+        return () => {
+            latestLoad.current += 1;
+        };
+    }, [load]);
+    const grouped = useMemo(() => {
+        const result: Record<string, ForkReadingSession[]> = {};
+        sessions.forEach((session) => {
+            (result[session.seriesId] ??= []).push(session);
+        });
+        return result;
+    }, [sessions]);
+    const tiles = stats
+        ? [
+              { label: 'Reading', value: `${Math.floor(stats.activeReadingSeconds / 60)}m` },
+              { label: 'Pages', value: stats.uniquePages },
+              { label: 'Volumes done', value: stats.completedVolumes },
+              { label: 'Lookups', value: stats.dictionaryLookups },
+              { label: 'Cards mined', value: stats.cardsMined },
+              ...(stats.ocrCharacters !== undefined
+                  ? [{ label: 'Chars (OCR est.)', value: stats.ocrCharacters.toLocaleString() }]
+                  : []),
+          ]
+        : [];
     const toggle = (sessionId: string) => {
         setSelected((current) =>
             current.includes(sessionId)
@@ -123,24 +141,25 @@ export const Stats = () => {
                     sx={{ bgcolor: 'transparent', borderColor: 'rgba(255,255,255,0.72)', borderRadius: 3 }}
                 >
                     <CardContent sx={{ py: 2, '&:last-child': { pb: 2 } }}>
-                        <Stack direction="row" justifyContent="space-around" textAlign="center">
-                            <Box>
-                                <Typography variant="h5" fontWeight={700}>
-                                    {Math.floor(stats.activeReadingSeconds / 60)}m
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    Reading
-                                </Typography>
-                            </Box>
-                            <Box>
-                                <Typography variant="h5" fontWeight={700}>
-                                    {stats.uniquePages}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    Pages
-                                </Typography>
-                            </Box>
-                        </Stack>
+                        <Box
+                            sx={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                                rowGap: 1.5,
+                                textAlign: 'center',
+                            }}
+                        >
+                            {tiles.map((tile) => (
+                                <Box key={tile.label}>
+                                    <Typography variant="h5" fontWeight={700}>
+                                        {tile.value}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                        {tile.label}
+                                    </Typography>
+                                </Box>
+                            ))}
+                        </Box>
                     </CardContent>
                 </Card>
             )}

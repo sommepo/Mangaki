@@ -1,5 +1,5 @@
 import React from 'react';
-import type { DictionaryResult, DictionaryDefinition } from '@/Manatan/types';
+import type { DictionaryResult } from '@/Manatan/types';
 
 export interface PitchInfo {
     position: number;

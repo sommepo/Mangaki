@@ -37,7 +37,9 @@ export const ForkReaderPageScrubber = () => {
 
     if (!isOverlayVisible || totalPages < 2) return null;
 
-    const currentPageNumber = Math.min(totalPages, pageIndex + 1);
+    // Follow the thumb while dragging so the label previews the page that will open.
+    const shownPageIndex = isReversed ? lastPageIndex - displayValue : displayValue;
+    const currentPageNumber = Math.max(1, Math.min(totalPages, shownPageIndex + 1));
 
     const openSelectedPage = (rawValue: number | number[]) => {
         const selectedDisplayIndex = Math.round(valueFromSlider(rawValue));
@@ -112,6 +114,7 @@ export const ForkReaderPageScrubber = () => {
             </Typography>
             <Slider
                 aria-label="Page navigation"
+                getAriaValueText={() => `Page ${currentPageNumber} of ${totalPages}`}
                 orientation={isVertical ? 'vertical' : 'horizontal'}
                 min={0}
                 max={lastPageIndex}

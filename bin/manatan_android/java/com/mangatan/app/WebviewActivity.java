@@ -2,16 +2,20 @@ package dev.local.mangareader;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Insets;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -20,14 +24,15 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
-import android.webkit.JavascriptInterface;
 import android.webkit.ConsoleMessage;
+import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
-import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -42,16 +47,38 @@ import org.json.JSONObject;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class WebviewActivity extends Activity {
+    private static final String DEFAULT_URL = "http://127.0.0.1:14568";
+    private static final String TAG = "MangaReader";
+    private static final String STATE_FOLDER_CALLBACK = "pending_folder_callback";
+    private static final String STATE_PAGE_URL = "page_url";
+    /** Encoding captures and writing exports must never block the UI thread. */
+    private static final ExecutorService BACKGROUND = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "MangaReader-io");
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
+        return thread;
+    });
+
     private static volatile boolean visible;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private FrameLayout rootLayout;
     private WebView myWebView;
     private OnBackInvokedCallback backInvokedCallback;
     private int localLoadRetryCount = 0;
+    private long lastLocalLoadErrorAt = 0L;
     private boolean runtimeRecoveryStarted = false;
     private long lastBackNavigationAt = 0L;
-    private String targetUrl = "http://127.0.0.1:14568";
-    
+    private int rendererLossCount = 0;
+    private long lastRendererLossAt = 0L;
+    private boolean started = false;
+    private boolean immersive = false;
+    private boolean notificationPermissionRequested = false;
+    private String targetUrl = DEFAULT_URL;
+
     // Flags
     private ValueCallback<Uri[]> uploadMessage;
     public final static int FILECHOOSER_RESULTCODE = 100;
@@ -71,26 +98,27 @@ public class WebviewActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        Intent intent = getIntent();
-        if (intent.hasExtra("TARGET_URL")) {
-            targetUrl = intent.getStringExtra("TARGET_URL");
+        if (savedInstanceState != null) {
+            pendingFolderCallbackId = savedInstanceState.getString(STATE_FOLDER_CALLBACK);
         }
-        
+
+        String requested = getIntent().getStringExtra("TARGET_URL");
+        if (requested != null) targetUrl = requested;
+
         if (!isForkLocalUrl(Uri.parse(targetUrl))) {
-            Log.w("MangaReader", "Rejected non-local privileged WebView target");
-            targetUrl = "http://127.0.0.1:14568";
+            Log.w(TAG, "Rejected non-local privileged WebView target");
+            targetUrl = DEFAULT_URL;
         }
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         setImmersiveMode(false);
 
-        FrameLayout layout = new FrameLayout(this);
-        layout.setLayoutParams(new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        rootLayout = new FrameLayout(this);
+        rootLayout.setBackgroundColor(surfaceColor());
+        rootLayout.setLayoutParams(new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        rootLayout.setOnApplyWindowInsetsListener(this::applySystemInsets);
 
-        myWebView = new WebView(this);
-        myWebView.setBackgroundColor(Color.BLACK);
-        layout.addView(myWebView, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        attachNewWebView();
 
         // Close Button
         if (!targetUrl.contains(":14568")) {
@@ -103,21 +131,51 @@ public class WebviewActivity extends Activity {
             btnParams.gravity = Gravity.BOTTOM | Gravity.END;
             btnParams.setMargins(0, 0, 50, 50);
             exitBtn.setOnClickListener(v -> handleSmartClose());
-            layout.addView(exitBtn, btnParams);
+            rootLayout.addView(exitBtn, btnParams);
         }
 
-        setContentView(layout);
+        setContentView(rootLayout);
 
-        WebSettings webSettings = myWebView.getSettings();
+        // After a recreation (light/dark switch, locale change, process restore) reopen the page
+        // the user was on instead of the launch URL.
+        String restoredUrl = savedInstanceState == null ? null : savedInstanceState.getString(STATE_PAGE_URL);
+        myWebView.loadUrl(restoredUrl != null && isForkLocalUrl(Uri.parse(restoredUrl)) ? restoredUrl : targetUrl);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backInvokedCallback = this::handleBackNavigation;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    backInvokedCallback);
+        }
+    }
+
+    /** Builds and attaches a fully configured WebView; also used to recover from a lost renderer. */
+    private void attachNewWebView() {
+        WebView webView = new WebView(this);
+        webView.setBackgroundColor(surfaceColor());
+        rootLayout.addView(webView, 0, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        myWebView = webView;
+
+        WebSettings webSettings = webView.getSettings();
         webSettings.setJavaScriptEnabled(true);
         webSettings.setDomStorageEnabled(true);
+        // Pages come only from the loopback server; nothing needs file:// access, and file pages
+        // must never reach other origins.
         webSettings.setAllowFileAccess(false);
+        webSettings.setAllowFileAccessFromFileURLs(false);
+        webSettings.setAllowUniversalAccessFromFileURLs(false);
+        // Kept on: <input type=file> results (dictionary/backup imports) are content:// URIs.
         webSettings.setAllowContentAccess(true);
-        
+        webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        webSettings.setJavaScriptCanOpenWindowsAutomatically(false);
+        webSettings.setSupportMultipleWindows(false);
+        webSettings.setGeolocationEnabled(false);
+        webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
+
         String userAgent = webSettings.getUserAgentString();
         webSettings.setUserAgentString(userAgent + " MangaReaderForkNative ManatanNative");
 
-        myWebView.setWebViewClient(new WebViewClient() {
+        webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
@@ -137,18 +195,18 @@ public class WebviewActivity extends Activity {
                             }
                         }
                     } catch (Exception e) {
-                        Log.e("Manatan", "Intent parse failed", e);
+                        Log.e(TAG, "Intent parse failed", e);
                     }
                     return true;
                 }
-                
+
                 // 2. BLOCK SHIM in Native App
                 if (urlString.contains("/api/v1/webview")) {
-                    String fragment = uri.getFragment(); 
+                    String fragment = uri.getFragment();
                     if (fragment != null && !fragment.isEmpty()) {
-                        Log.i("Manatan", "Native Intercept: Skipping Shim for " + fragment);
+                        Log.i(TAG, "Native intercept: skipping WebView shim");
                         launchReader(fragment);
-                        return true; 
+                        return true;
                     }
                 }
 
@@ -156,70 +214,68 @@ public class WebviewActivity extends Activity {
                     return false;
                 }
 
+                // Remote frames never navigate inside the privileged WebView, and a sub-frame
+                // (e.g. an embed in dictionary markup) must not launch a browser by itself.
+                if (!request.isForMainFrame()) return true;
+
                 // Keep untrusted remote pages outside the privileged WebView that owns
                 // the Android bridge. Source protocols are handled by native clients.
-                try {
-                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
-                    browserIntent.addCategory(Intent.CATEGORY_BROWSABLE);
-                    startActivity(browserIntent);
-                } catch (Exception error) {
-                    Log.e("MangaReader", "Could not open external link", error);
-                }
+                openInBrowser(uri);
                 return true;
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                Log.i("MangaReader", "WebView loaded " + url);
-                // MODIFIED: No sync here. 
-                // This prevents the toast from appearing when the webview first opens.
+                Log.i(TAG, "WebView page finished");
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                Log.e("MangaReader", "WebView request failed: " + request.getUrl() + " — " + error.getDescription());
-                if (request.isForMainFrame() && isForkLocalUrl(request.getUrl())) {
-                    localLoadRetryCount += 1;
-                    if (!MangatanActivity.isRuntimeHostAlive() || localLoadRetryCount >= 8) {
-                        requestRuntimeRecovery();
-                        return;
-                    }
-                    view.loadDataWithBaseURL(
-                            targetUrl,
-                            "<html><body style='margin:0;background:#090909;color:#ddd;font:16px sans-serif;display:grid;place-items:center;height:100vh'>Loading your library…</body></html>",
-                            "text/html",
-                            "UTF-8",
-                            null);
-                    new Handler(Looper.getMainLooper()).postDelayed(
-                            () -> {
-                                if (!isFinishing() && myWebView != null) myWebView.loadUrl(targetUrl);
-                            },
-                            Math.min(4000, 500L * localLoadRetryCount));
+                if (!request.isForMainFrame()) return;
+                Log.e(TAG, "WebView main-frame load failed: " + error.getDescription());
+                if (view != myWebView || !isForkLocalUrl(request.getUrl())) return;
+                long now = SystemClock.elapsedRealtime();
+                // The retry budget is for one outage, not for the whole session.
+                if (now - lastLocalLoadErrorAt > 30_000L) localLoadRetryCount = 0;
+                lastLocalLoadErrorAt = now;
+                localLoadRetryCount += 1;
+                if (!MangatanActivity.isRuntimeHostAlive() || localLoadRetryCount >= 8) {
+                    requestRuntimeRecovery();
+                    return;
                 }
+                final String retryUrl = request.getUrl().toString();
+                view.loadDataWithBaseURL(
+                        targetUrl,
+                        "<html><body style='margin:0;background:#090909;color:#ddd;font:16px sans-serif;display:grid;place-items:center;height:100vh'>Loading your library…</body></html>",
+                        "text/html",
+                        "UTF-8",
+                        null);
+                mainHandler.postDelayed(
+                        () -> {
+                            if (!isFinishing() && myWebView == view) myWebView.loadUrl(retryUrl);
+                        },
+                        Math.min(4000, 500L * localLoadRetryCount));
             }
 
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                String currentUrl = view.getUrl();
-                String recoveryUrl = isForkLocalUrl(Uri.parse(currentUrl == null ? "" : currentUrl))
-                        ? currentUrl
-                        : targetUrl;
-                Log.e("MangaReader", "WebView renderer exited; rebuilding reader surface");
-                destroyWebView(view);
-                Intent recoveryIntent = new Intent(WebviewActivity.this, WebviewActivity.class);
-                recoveryIntent.putExtra("TARGET_URL", recoveryUrl);
-                recoveryIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                finish();
-                startActivity(recoveryIntent);
+                recoverFromRendererLoss(view, detail.didCrash());
                 return true;
             }
         });
 
-        myWebView.setWebChromeClient(new WebChromeClient() {
+        webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onConsoleMessage(ConsoleMessage message) {
-                Log.e("MangaReaderConsole", message.messageLevel() + " " + message.sourceId() + ":" + message.lineNumber() + " " + message.message());
+                // Only warnings and errors: page logs can be chatty and may contain titles or
+                // looked-up text, which must not end up in logcat.
+                ConsoleMessage.MessageLevel level = message.messageLevel();
+                if (level == ConsoleMessage.MessageLevel.ERROR) {
+                    Log.e("MangaReaderConsole", message.sourceId() + ":" + message.lineNumber() + " " + message.message());
+                } else if (level == ConsoleMessage.MessageLevel.WARNING) {
+                    Log.w("MangaReaderConsole", message.sourceId() + ":" + message.lineNumber() + " " + message.message());
+                }
                 return true;
             }
 
@@ -230,9 +286,8 @@ public class WebviewActivity extends Activity {
                     uploadMessage = null;
                 }
                 uploadMessage = filePathCallback;
-                Intent intent = fileChooserParams.createIntent();
                 try {
-                    startActivityForResult(intent, FILECHOOSER_RESULTCODE);
+                    startActivityForResult(fileChooserParams.createIntent(), FILECHOOSER_RESULTCODE);
                 } catch (ActivityNotFoundException e) {
                     uploadMessage = null;
                     return false;
@@ -242,37 +297,45 @@ public class WebviewActivity extends Activity {
         });
 
         NativeCaptureBridge nativeBridge = new NativeCaptureBridge();
-        myWebView.addJavascriptInterface(nativeBridge, "ManatanNative");
-        myWebView.addJavascriptInterface(nativeBridge, "MangaReaderNative");
+        webView.addJavascriptInterface(nativeBridge, "ManatanNative");
+        webView.addJavascriptInterface(nativeBridge, "MangaReaderNative");
 
-        myWebView.loadUrl(targetUrl);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            backInvokedCallback = this::handleBackNavigation;
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    backInvokedCallback);
+        if (!started) {
+            webView.onPause();
         }
     }
 
+    /**
+     * The renderer can be killed for memory while the app is in the background, or crash. Rebuild
+     * only the WebView in place (instead of finishing and relaunching the activity) and reload the
+     * page the user was on; repeated losses fall back to the library to avoid a crash loop.
+     */
+    private void recoverFromRendererLoss(WebView view, boolean crashed) {
+        String currentUrl = view.getUrl();
+        boolean wasActive = view == myWebView;
+        Log.e(TAG, "WebView renderer " + (crashed ? "crashed" : "was killed") + "; rebuilding reader surface");
+        destroyWebView(view);
+        if (!wasActive || isFinishing() || isDestroyed()) return;
+
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastRendererLossAt > 60_000L) rendererLossCount = 0;
+        lastRendererLossAt = now;
+        rendererLossCount += 1;
+
+        String recoveryUrl = currentUrl != null && isForkLocalUrl(Uri.parse(currentUrl)) ? currentUrl : targetUrl;
+        if (rendererLossCount > 2) recoveryUrl = DEFAULT_URL;
+        attachNewWebView();
+        myWebView.loadUrl(recoveryUrl);
+    }
+
     private void sendCaptureCallback(String callbackId, String dataUrl) {
-        if (myWebView == null) return;
         final String safeId = JSONObject.quote(callbackId);
         final String safeData = dataUrl == null ? "null" : JSONObject.quote(dataUrl);
         final String script =
             "window.__manatanNativeCaptureCallback && window.__manatanNativeCaptureCallback(" + safeId + "," + safeData + ");";
-        runOnUiThread(() -> myWebView.evaluateJavascript(script, null));
-    }
-
-    private Bitmap cropBitmap(Bitmap source, float x, float y, float width, float height, float dpr) {
-        if (source == null) return null;
-        if (width <= 0 || height <= 0) return source;
-        int left = Math.max(0, Math.round(x * dpr));
-        int top = Math.max(0, Math.round(y * dpr));
-        int cropWidth = Math.min(source.getWidth() - left, Math.round(width * dpr));
-        int cropHeight = Math.min(source.getHeight() - top, Math.round(height * dpr));
-        if (cropWidth <= 0 || cropHeight <= 0) return source;
-        return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight);
+        runOnUiThread(() -> {
+            if (myWebView != null) myWebView.evaluateJavascript(script, null);
+        });
     }
 
     private String encodeBitmapToDataUrl(Bitmap bitmap, float quality) {
@@ -285,11 +348,12 @@ public class WebviewActivity extends Activity {
             String base64 = Base64.encodeToString(bytes, Base64.NO_WRAP);
             return "data:image/jpeg;base64," + base64;
         } catch (Exception e) {
-            Log.e("Manatan", "Failed to encode bitmap", e);
+            Log.e(TAG, "Failed to encode bitmap", e);
             return null;
         }
     }
 
+    /** JavaScript bridge. Methods run on WebView's private "JavaBridge" thread, not the UI thread. */
     private class NativeCaptureBridge {
         @JavascriptInterface
         public String getAnkiBridgeToken() {
@@ -302,6 +366,8 @@ public class WebviewActivity extends Activity {
                 if (checkSelfPermission("com.ichi2.anki.permission.READ_WRITE_DATABASE")
                         != PackageManager.PERMISSION_GRANTED) {
                     requestPermissions(new String[]{"com.ichi2.anki.permission.READ_WRITE_DATABASE"}, ANKI_PERMISSION_REQUEST);
+                } else {
+                    notifyPermissionResult("anki", true);
                 }
             });
         }
@@ -314,20 +380,24 @@ public class WebviewActivity extends Activity {
         @JavascriptInterface
         public void updateBackgroundJobs(final boolean active, final String title, final int completed, final int total) {
             runOnUiThread(() -> {
-                if (!active) {
-                    JobForegroundService.stop(getApplicationContext());
-                    return;
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                        && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-                    requestPermissions(
-                            new String[]{"android.permission.POST_NOTIFICATIONS"},
-                            NOTIFICATION_PERMISSION_REQUEST);
-                }
                 try {
+                    if (!active) {
+                        JobForegroundService.stop(getApplicationContext());
+                        return;
+                    }
+                    // Ask once per screen: progress ticks arrive every few seconds and each
+                    // permission request pauses this activity.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                            && !notificationPermissionRequested
+                            && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                        notificationPermissionRequested = true;
+                        requestPermissions(
+                                new String[]{"android.permission.POST_NOTIFICATIONS"},
+                                NOTIFICATION_PERMISSION_REQUEST);
+                    }
                     JobForegroundService.update(getApplicationContext(), title, completed, total);
                 } catch (Exception error) {
-                    Log.e("MangaReader", "Could not start background-job notification", error);
+                    Log.e(TAG, "Could not update background-job notification", error);
                 }
             });
         }
@@ -340,35 +410,33 @@ public class WebviewActivity extends Activity {
                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                         | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                         | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                startActivityForResult(intent, FOLDER_PICKER_RESULTCODE);
+                try {
+                    startActivityForResult(intent, FOLDER_PICKER_RESULTCODE);
+                } catch (ActivityNotFoundException error) {
+                    Log.e(TAG, "No document picker is available", error);
+                    pendingFolderCallbackId = null;
+                    sendFolderCallback(callbackId, null);
+                    Toast.makeText(getApplicationContext(), "No folder picker is available on this device", Toast.LENGTH_SHORT).show();
+                }
             });
         }
 
         @JavascriptInterface
         public void openExternalUrl(final String url) {
             if (url == null || url.isEmpty()) return;
-
-            runOnUiThread(() -> {
-                try {
-                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                    browserIntent.addCategory(Intent.CATEGORY_BROWSABLE);
-                    startActivity(browserIntent);
-                } catch (ActivityNotFoundException e) {
-                    Log.e("Manatan", "No browser found for OAuth URL", e);
-                    Toast.makeText(WebviewActivity.this, "No browser available for Google sign-in", Toast.LENGTH_SHORT).show();
-                } catch (Exception e) {
-                    Log.e("Manatan", "Failed to open OAuth URL in external browser", e);
-                }
-            });
+            final Uri uri = Uri.parse(url);
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+            // Only web links: intent:, file:, content: and other schemes could reach app
+            // components or private files on behalf of page script.
+            if (!scheme.equals("https") && !scheme.equals("http")) {
+                Log.w(TAG, "Refused to open a non-web URL scheme: " + scheme);
+                return;
+            }
+            runOnUiThread(() -> openInBrowser(uri));
         }
 
         @JavascriptInterface
         public void captureFrame(final String callbackId, final String payloadJson) {
-            if (myWebView == null) {
-                sendCaptureCallback(callbackId, null);
-                return;
-            }
-
             float x = 0f;
             float y = 0f;
             float width = 0f;
@@ -384,7 +452,7 @@ public class WebviewActivity extends Activity {
                 dpr = (float) payload.optDouble("dpr", 1d);
                 quality = (float) payload.optDouble("quality", 0.92d);
             } catch (Exception e) {
-                Log.e("Manatan", "Failed to parse capture payload", e);
+                Log.e(TAG, "Failed to parse capture payload", e);
             }
 
             final float cropX = x;
@@ -394,46 +462,7 @@ public class WebviewActivity extends Activity {
             final float devicePixelRatio = dpr;
             final float qualityFinal = quality;
 
-            runOnUiThread(() -> {
-                try {
-                    int widthPx = Math.max(1, myWebView.getWidth());
-                    int heightPx = Math.max(1, myWebView.getHeight());
-                    Bitmap bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888);
-                    Handler handler = new Handler(Looper.getMainLooper());
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        PixelCopy.request(getWindow(), bitmap, result -> {
-                            if (result != PixelCopy.SUCCESS) {
-                                Log.e("Manatan", "PixelCopy failed: " + result);
-                                bitmap.recycle();
-                                sendCaptureCallback(callbackId, null);
-                                return;
-                            }
-
-                            Bitmap cropped = cropBitmap(bitmap, cropX, cropY, cropWidth, cropHeight, devicePixelRatio);
-                            String dataUrl = encodeBitmapToDataUrl(cropped, qualityFinal);
-                            if (cropped != bitmap) {
-                                cropped.recycle();
-                            }
-                            bitmap.recycle();
-                            sendCaptureCallback(callbackId, dataUrl);
-                        }, handler);
-                    } else {
-                        Canvas canvas = new Canvas(bitmap);
-                        myWebView.draw(canvas);
-                        Bitmap cropped = cropBitmap(bitmap, cropX, cropY, cropWidth, cropHeight, devicePixelRatio);
-                        String dataUrl = encodeBitmapToDataUrl(cropped, qualityFinal);
-                        if (cropped != bitmap) {
-                            cropped.recycle();
-                        }
-                        bitmap.recycle();
-                        sendCaptureCallback(callbackId, dataUrl);
-                    }
-                } catch (Exception e) {
-                    Log.e("Manatan", "Native capture failed", e);
-                    sendCaptureCallback(callbackId, null);
-                }
-            });
+            runOnUiThread(() -> captureRegion(callbackId, cropX, cropY, cropWidth, cropHeight, devicePixelRatio, qualityFinal));
         }
 
         @JavascriptInterface
@@ -461,7 +490,7 @@ public class WebviewActivity extends Activity {
                     intent.putExtra(Intent.EXTRA_TITLE, filename);
                     startActivityForResult(intent, SAVEFILE_RESULTCODE);
                 } catch (Exception e) {
-                    Log.e("Manatan", "Failed to launch save dialog", e);
+                    Log.e(TAG, "Failed to launch save dialog", e);
                     clearPendingExport();
                     Toast.makeText(WebviewActivity.this, "No document provider is available", Toast.LENGTH_SHORT).show();
                 }
@@ -469,8 +498,69 @@ public class WebviewActivity extends Activity {
         }
     }
 
+    /**
+     * Copies exactly the requested page region. The source rectangle is offset by the WebView's
+     * position in the window, so captures stay aligned when the window also contains system-bar
+     * areas, and only the cropped pixels are allocated. JPEG encoding runs off the UI thread.
+     */
+    private void captureRegion(String callbackId, float x, float y, float width, float height, float dpr, float quality) {
+        WebView view = myWebView;
+        if (view == null || view.getWidth() <= 0 || view.getHeight() <= 0 || isFinishing()) {
+            sendCaptureCallback(callbackId, null);
+            return;
+        }
+        try {
+            int[] location = new int[2];
+            view.getLocationInWindow(location);
+            Rect source = new Rect(location[0], location[1],
+                    location[0] + view.getWidth(), location[1] + view.getHeight());
+            if (width > 0 && height > 0) {
+                Rect crop = new Rect(
+                        location[0] + Math.round(x * dpr),
+                        location[1] + Math.round(y * dpr),
+                        location[0] + Math.round((x + width) * dpr),
+                        location[1] + Math.round((y + height) * dpr));
+                if (crop.intersect(source)) source = crop;
+            }
+            Bitmap bitmap = Bitmap.createBitmap(source.width(), source.height(), Bitmap.Config.ARGB_8888);
+            PixelCopy.request(getWindow(), source, bitmap, result -> {
+                if (result != PixelCopy.SUCCESS) {
+                    Log.e(TAG, "PixelCopy failed: " + result);
+                    bitmap.recycle();
+                    sendCaptureCallback(callbackId, null);
+                    return;
+                }
+                BACKGROUND.execute(() -> {
+                    String dataUrl = encodeBitmapToDataUrl(bitmap, quality);
+                    bitmap.recycle();
+                    sendCaptureCallback(callbackId, dataUrl);
+                });
+            }, mainHandler);
+        } catch (Exception e) {
+            Log.e(TAG, "Native capture failed", e);
+            sendCaptureCallback(callbackId, null);
+        }
+    }
+
+    /** Follows the system light/dark setting (the theme is DayNight on Android 10+). */
+    private boolean isNightMode() {
+        int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return night == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** Background behind the page and under the system bars; avoids a black flash in light mode. */
+    private int surfaceColor() {
+        return isNightMode() ? Color.BLACK : Color.WHITE;
+    }
+
     private void setImmersiveMode(boolean enabled) {
+        immersive = enabled;
         int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+        if (!isNightMode()) {
+            // setSystemUiVisibility replaces every flag, so keep the light-bar appearance that
+            // gives dark status/navigation icons on the light surface.
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
         if (enabled) {
             flags |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
@@ -479,6 +569,53 @@ public class WebviewActivity extends Activity {
                     | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
         }
         getWindow().getDecorView().setSystemUiVisibility(flags);
+        if (rootLayout != null) rootLayout.requestApplyInsets();
+    }
+
+    /**
+     * Library and settings screens sit between the system bars like ordinary Android screens; the
+     * reader (immersive) uses the whole display. When the window is edge-to-edge (always on
+     * Android 15+ for this target SDK) the bar and keyboard insets would otherwise cover the page.
+     * Display-cutout insets are passed on in immersive mode so CSS safe-area-inset still works.
+     */
+    private WindowInsets applySystemInsets(View view, WindowInsets insets) {
+        int left = 0;
+        int top = 0;
+        int right = 0;
+        int bottom = 0;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            Insets ime = insets.getInsets(WindowInsets.Type.ime());
+            if (immersive) {
+                bottom = ime.bottom;
+            } else {
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = Math.max(bars.bottom, ime.bottom);
+            }
+        } else if (!immersive) {
+            left = insets.getSystemWindowInsetLeft();
+            top = insets.getSystemWindowInsetTop();
+            right = insets.getSystemWindowInsetRight();
+            bottom = insets.getSystemWindowInsetBottom();
+        }
+        view.setPadding(left, top, right, bottom);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!immersive) return WindowInsets.CONSUMED;
+            return new WindowInsets.Builder(insets)
+                    .setInsets(WindowInsets.Type.systemBars(), Insets.NONE)
+                    .setInsets(WindowInsets.Type.ime(), Insets.NONE)
+                    .build();
+        }
+        return immersive ? insets : insets.consumeSystemWindowInsets();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Dialogs, the keyboard and permission prompts clear the legacy immersive flags.
+        if (hasFocus && immersive) setImmersiveMode(true);
     }
 
     private void sendFolderCallback(String callbackId, String uri) {
@@ -486,6 +623,14 @@ public class WebviewActivity extends Activity {
         String script = "window.mangaReaderFolderPicked && window.mangaReaderFolderPicked("
                 + JSONObject.quote(callbackId) + ","
                 + (uri == null ? "null" : JSONObject.quote(uri)) + ");";
+        myWebView.evaluateJavascript(script, null);
+    }
+
+    /** Lets the page react to a permission decision (e.g. retry the AnkiDroid connection). */
+    private void notifyPermissionResult(String permission, boolean granted) {
+        if (myWebView == null) return;
+        String script = "window.dispatchEvent(new CustomEvent('mangareadernativepermission',{detail:{permission:"
+                + JSONObject.quote(permission) + ",granted:" + granted + "}}));";
         myWebView.evaluateJavascript(script, null);
     }
 
@@ -510,17 +655,61 @@ public class WebviewActivity extends Activity {
                 && (port == 14568 || port == 18765);
     }
 
+    private static boolean isRootUrl(Uri uri) {
+        String path = uri.getPath();
+        return (path == null || path.isEmpty() || path.equals("/"))
+                && uri.getQuery() == null && uri.getFragment() == null;
+    }
+
     private void clearPendingExport() {
         pendingExportFilename = null;
         pendingExportMimeType = null;
         pendingExportContent = null;
     }
 
+    private void openInBrowser(Uri uri) {
+        try {
+            Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+            browserIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(browserIntent);
+        } catch (ActivityNotFoundException e) {
+            Log.e(TAG, "No browser available", e);
+            Toast.makeText(getApplicationContext(), "No browser is available to open this link", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Log.e(TAG, "Could not open external link", e);
+        }
+    }
+
+    /**
+     * Shim/deep-link navigation. Local pages load in this WebView (stacking a second WebView
+     * activity would double memory use, and with singleTop the intent was silently dropped);
+     * anything else opens outside the privileged WebView.
+     */
     private void launchReader(String url) {
-        Intent webIntent = new Intent(WebviewActivity.this, WebviewActivity.class);
-        webIntent.putExtra("TARGET_URL", url);
-        webIntent.putExtra("FROM_SHIM", false); // Native launch
-        startActivity(webIntent);
+        if (url == null || url.isEmpty()) return;
+        Uri uri = Uri.parse(url);
+        if (isForkLocalUrl(uri)) {
+            if (myWebView != null) myWebView.loadUrl(url);
+            return;
+        }
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (scheme.equals("http") || scheme.equals("https")) openInBrowser(uri);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String requested = intent == null ? null : intent.getStringExtra("TARGET_URL");
+        if (requested == null || myWebView == null) return;
+        Uri uri = Uri.parse(requested);
+        if (!isForkLocalUrl(uri)) return;
+        String current = myWebView.getUrl();
+        if (requested.equals(current)) return;
+        // A plain "show the app" request must not throw away the page (and reader position) the
+        // user is on; only a specific destination navigates.
+        if (isRootUrl(uri) && current != null && isForkLocalUrl(Uri.parse(current))) return;
+        myWebView.loadUrl(requested);
     }
 
     private void handleSmartClose() {
@@ -543,23 +732,24 @@ public class WebviewActivity extends Activity {
                 .putString("target_url", recoveryUrl)
                 .apply();
 
-        Log.w("MangaReader", "Embedded server unavailable; recreating runtime host");
+        Log.w(TAG, "Embedded server unavailable; recreating runtime host");
         Intent recoveryIntent = new Intent(this, MangatanActivity.class);
         recoveryIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(recoveryIntent);
     }
 
     private void handleBackNavigation() {
-        long now = android.os.SystemClock.elapsedRealtime();
+        long now = SystemClock.elapsedRealtime();
         if (now - lastBackNavigationAt < 750L) return;
         lastBackNavigationAt = now;
 
-        if (myWebView == null) {
+        final WebView view = myWebView;
+        if (view == null) {
             handleSmartClose();
             return;
         }
         try {
-            myWebView.evaluateJavascript(
+            view.evaluateJavascript(
                 "(() => {"
                     + "if (window.__handleNativeBack && window.__handleNativeBack()) return true;"
                     + "if (window.location.pathname.startsWith('/fork/reader/')) {"
@@ -569,11 +759,12 @@ public class WebviewActivity extends Activity {
                     + "})()",
                 value -> {
                     if ("true".equals(value)) return;
-                    if (myWebView.canGoBack()) myWebView.goBack();
+                    // The WebView may have been replaced or destroyed while the script ran.
+                    if (view == myWebView && view.canGoBack()) view.goBack();
                     else handleSmartClose();
                 });
         } catch (Exception error) {
-            if (myWebView.canGoBack()) myWebView.goBack();
+            if (view.canGoBack()) view.goBack();
             else handleSmartClose();
         }
     }
@@ -587,6 +778,14 @@ public class WebviewActivity extends Activity {
     protected void onStart() {
         super.onStart();
         visible = true;
+        started = true;
+        // Timers are paused/resumed in onStart/onStop, not onPause/onResume: a permission dialog,
+        // the folder picker overlay or split-screen focus loss must not freeze the page while it
+        // is still on screen.
+        if (myWebView != null) {
+            myWebView.onResume();
+            myWebView.resumeTimers();
+        }
     }
 
     @Override
@@ -595,27 +794,29 @@ public class WebviewActivity extends Activity {
         visible = true;
         if (!MangatanActivity.isRuntimeHostAlive()) {
             requestRuntimeRecovery();
-            return;
         }
-        if (myWebView != null) {
-            myWebView.onResume();
-            myWebView.resumeTimers();
-        }
-    }
-
-    @Override
-    protected void onPause() {
-        if (myWebView != null) {
-            myWebView.onPause();
-            myWebView.pauseTimers();
-        }
-        super.onPause();
     }
 
     @Override
     protected void onStop() {
         visible = false;
+        started = false;
+        if (myWebView != null) {
+            myWebView.onPause();
+            // pauseTimers() is process-wide; this is the only WebView, so it stops all page
+            // timers and polling while the app is in the background.
+            myWebView.pauseTimers();
+        }
         super.onStop();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        // Survives process death while the system folder picker is open.
+        if (pendingFolderCallbackId != null) outState.putString(STATE_FOLDER_CALLBACK, pendingFolderCallbackId);
+        String currentUrl = myWebView == null ? null : myWebView.getUrl();
+        if (currentUrl != null && isForkLocalUrl(Uri.parse(currentUrl))) outState.putString(STATE_PAGE_URL, currentUrl);
     }
 
     private void destroyWebView(WebView view) {
@@ -625,12 +826,13 @@ public class WebviewActivity extends Activity {
             view.onPause();
             view.removeJavascriptInterface("ManatanNative");
             view.removeJavascriptInterface("MangaReaderNative");
+            view.setWebChromeClient(null);
             ViewParent parent = view.getParent();
             if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(view);
             view.removeAllViews();
             view.destroy();
         } catch (Exception error) {
-            Log.e("MangaReader", "Could not fully release WebView", error);
+            Log.e(TAG, "Could not fully release WebView", error);
         }
         if (view == myWebView) myWebView = null;
     }
@@ -642,6 +844,12 @@ public class WebviewActivity extends Activity {
             backInvokedCallback = null;
         }
         visible = false;
+        mainHandler.removeCallbacksAndMessages(null);
+        if (uploadMessage != null) {
+            // A file chooser that never answers leaves the page's <input type=file> stuck.
+            uploadMessage.onReceiveValue(null);
+            uploadMessage = null;
+        }
         destroyWebView(myWebView);
         super.onDestroy();
     }
@@ -662,29 +870,30 @@ public class WebviewActivity extends Activity {
             uploadMessage.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
             uploadMessage = null;
         } else if (requestCode == SAVEFILE_RESULTCODE) {
-            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
-                clearPendingExport();
-                return;
-            }
-
-            Uri uri = data.getData();
-            try (OutputStream outputStream = getContentResolver().openOutputStream(uri)) {
-                if (outputStream == null) {
-                    throw new IllegalStateException("No output stream returned for export URI");
+            final String content = pendingExportContent;
+            final String savedName = pendingExportFilename != null ? pendingExportFilename : "file";
+            clearPendingExport();
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+            final Uri uri = data.getData();
+            final Context app = getApplicationContext();
+            // Exports can be large; write them off the UI thread.
+            BACKGROUND.execute(() -> {
+                boolean saved = false;
+                try (OutputStream outputStream = app.getContentResolver().openOutputStream(uri)) {
+                    if (outputStream == null) {
+                        throw new IllegalStateException("No output stream returned for export URI");
+                    }
+                    outputStream.write((content == null ? "" : content).getBytes(StandardCharsets.UTF_8));
+                    outputStream.flush();
+                    saved = true;
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to write exported file", e);
                 }
-
-                byte[] bytes = (pendingExportContent == null ? "" : pendingExportContent).getBytes(StandardCharsets.UTF_8);
-                outputStream.write(bytes);
-                outputStream.flush();
-
-                String savedName = pendingExportFilename != null ? pendingExportFilename : "file";
-                Toast.makeText(this, "Saved " + savedName, Toast.LENGTH_SHORT).show();
-            } catch (Exception e) {
-                Log.e("Manatan", "Failed to write exported file", e);
-                Toast.makeText(this, "Failed to save file", Toast.LENGTH_SHORT).show();
-            } finally {
-                clearPendingExport();
-            }
+                final boolean success = saved;
+                mainHandler.post(() -> Toast.makeText(app,
+                        success ? "Saved " + savedName : "Failed to save file",
+                        Toast.LENGTH_SHORT).show());
+            });
         } else if (requestCode == FOLDER_PICKER_RESULTCODE) {
             String callbackId = pendingFolderCallbackId;
             pendingFolderCallbackId = null;
@@ -693,12 +902,11 @@ public class WebviewActivity extends Activity {
                 return;
             }
             Uri uri = data.getData();
-            int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             try {
-                getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 sendFolderCallback(callbackId, uri.toString());
-            } catch (SecurityException error) {
-                Log.e("MangaReader", "Could not persist folder permission", error);
+            } catch (RuntimeException error) {
+                Log.e(TAG, "Could not persist folder permission", error);
                 sendFolderCallback(callbackId, null);
             }
         } else {
@@ -714,6 +922,7 @@ public class WebviewActivity extends Activity {
             if (!granted) {
                 Toast.makeText(this, "Anki permission denied.", Toast.LENGTH_LONG).show();
             }
+            notifyPermissionResult("anki", granted);
         }
     }
 }
